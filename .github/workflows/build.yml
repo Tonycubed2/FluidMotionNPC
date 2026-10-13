@@ -1,0 +1,29 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+      - name: Configure
+        run: xmake f -p windows -m releasedbg -y
+      - name: Build
+        run: xmake -y
+      - name: Collect
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out/SKSE/Plugins | Out-Null
+          Get-ChildItem build -Recurse -Include FluidMotionNPC.dll,FluidMotionNPC.pdb | Copy-Item -Destination out/SKSE/Plugins
+          Copy-Item dist/SKSE/Plugins/* out/SKSE/Plugins
+          Get-ChildItem -Recurse out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FluidMotionNPC
+          path: out
