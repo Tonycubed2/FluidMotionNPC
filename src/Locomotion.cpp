@@ -469,10 +469,14 @@ namespace Locomotion
 					const auto  slot = static_cast<std::int32_t>(arr[j].unk08);
 					if (real && slot >= 0) {
 						auto* tree = netimmerse_cast<RE::BSFlattenedBoneTree*>(real);
-						if (!tree || static_cast<std::uint32_t>(slot) >= tree->numBones || !tree->boneEntries) {
+						if (!tree) {
 							continue;
 						}
-						auto* n = tree->boneEntries[slot].node;
+						auto& td = tree->GetRuntimeData();
+						if (static_cast<std::uint32_t>(slot) >= td.numBones || !td.boneEntries) {
+							continue;
+						}
+						auto* n = td.boneEntries[slot].node;
 						real = n ? n->AsNode() : nullptr;
 					}
 					if (real && Below(real, a_root) && std::string_view(real->name.c_str()).starts_with("NPC ")) {
