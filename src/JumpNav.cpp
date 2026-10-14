@@ -425,6 +425,26 @@ namespace JumpNav
 			}
 		}
 
+		// A teammate the AI is actually trying to bring to the player. Its running package targets the
+		// player (vanilla FollowerPackageTemplate, NFF/AFT/EFF follow packages). Followers told to wait run a
+		// wait/sandbox/hold package whose target is a spot or nothing, and vanilla wait also sets
+		// WaitingForPlayer. Only these followers are routed or jumped toward the player.
+		bool FollowingPlayer(RE::Actor* a_actor)
+		{
+			if (!a_actor || !a_actor->IsPlayerTeammate()) {
+				return false;
+			}
+			if (auto* avo = a_actor->AsActorValueOwner(); avo && avo->GetActorValue(RE::ActorValue::kWaitingForPlayer) > 0.0f) {
+				return false;
+			}
+			auto* proc = a_actor->GetActorRuntimeData().currentProcess;
+			if (!proc) {
+				return false;
+			}
+			const auto tgt = proc->currentPackage.target.get();
+			return tgt && tgt.get() == RE::PlayerCharacter::GetSingleton();
+		}
+
 		// Route legs move the actor by hand. The graph only plays its run/walk loop when it is in its
 		// movement state, which the engine enters on "moveStart" - sent by the AI when *it* starts moving.
 		// A follower routed because vanilla can't reach the player is standing still, so without this the
@@ -965,7 +985,7 @@ namespace JumpNav
 						Push(s, i, pl.stand, 1.3f * cur.p.GetDistance(pl.stand) + 120.0f, false, true, true, dx, dy);
 						continue;
 					}
-					for (float d : { 110.0f, 180.0f, s.caps.dist * 0.85f }) {
+					for (float d : { s.caps.dist * 0.85f, 180.0f, 110.0f }) {
 						if (s.caps.jumps && JumpEdge(s, r, cur.p, dx, dy, d, q)) {
 							if (cfg.log && s.whyLogged < 3 && !walked[0]) {
 								++s.whyLogged;
@@ -974,7 +994,9 @@ namespace JumpNav
 									WalkWhy(s, r, cur.p, std::cos(s.base), std::sin(s.base), cfg.routeStep), k, d,
 									walked[0], walked[1], walked[2], walked[3], walked[4], walked[5], walked[6], walked[7]);
 							}
-							Push(s, i, q, 1.3f * cur.p.GetDistance(q) + 80.0f, true);
+							// a jump right after a jump costs more, so a climb, a walk or one longer jump wins over a
+							// staircase of short hops up a rocky slope
+							Push(s, i, q, 1.3f * cur.p.GetDistance(q) + 80.0f + (cur.jump ? 160.0f : 0.0f), true);
 							break;
 						}
 					}
@@ -1110,7 +1132,7 @@ namespace JumpNav
 					drop = "lost";
 				} else if (g_time > g.until) {
 					drop = "timeout";
-				} else if (!actor->IsInCombat() && !actor->IsPlayerTeammate()) {
+				} else if (!actor->IsInCombat() && !FollowingPlayer(actor)) {
 					drop = "calm";
 				} else if (!actor->IsInCombat() && Len2D(RE::PlayerCharacter::GetSingleton()->GetPosition() - actor->GetPosition()) < 0.6f * cfg.followRouteMin) {
 					drop = "arrived";
@@ -1341,7 +1363,7 @@ namespace JumpNav
 				Searching(a_actor->GetFormID()) || FindGlide(a_actor->GetFormID())) {
 				return;
 			}
-			const bool follower = !a_actor->IsInCombat() && a_actor->IsPlayerTeammate();
+			const bool follower = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
 			if (follower) {
 				Vec fv;
 				a_actor->GetLinearVelocity(fv);
@@ -1542,6 +1564,18 @@ namespace JumpNav
 				return false;
 			}
 
+			if (d.z > 0.0f && dh < 180.0f && a_caps.npc && !Mantle::Active(a_actor->GetFormID())) {
+				const Vec toward = dh > 1.0f ? Vec{ d.x / dh, d.y / dh, 0.0f } : Vec{ 0, 1, 0 };
+				if (Mantle::TryStart(a_actor, false, &toward, 90.0f, 85.0f) || (a_caps.jumps && Mantle::TryStart(a_actor, true, &toward, 90.0f, 85.0f))) {
+					if (cfg.log) {
+						auto* n = a_actor->GetName();
+						logger::info("[{}] REACHCLIMB {:08X} '{}' {} dh={:.0f} dz={:+.0f}", Tuning::ModeLabel(), a_actor->GetFormID(), n ? n : "",
+							TriggerName(a_trigger), dh, d.z);
+					}
+					a_memo.cooldownUntil = g_time + cfg.cooldown;
+					return true;
+				}
+			}
 			Vec back = dh > 1.0f ? Vec{ -d.x / dh, -d.y / dh, 0.0f } : Vec{ 0, -1, 0 };
 			Reject first = Reject::kOk;
 			for (float deg : { 0.0f, 45.0f, -45.0f, 90.0f, -90.0f }) {
@@ -1613,12 +1647,14 @@ namespace JumpNav
 						return;
 					}
 				}
-			} else if (cfg.follow && a_actor->IsPlayerTeammate()) {
+			} else if (cfg.follow && FollowingPlayer(a_actor)) {
 				if (TryReach(a_actor, caps, RE::PlayerCharacter::GetSingleton(), Trigger::kFollow, cfg.followStuckSec, 100.0f, 60.0f, m, a_plans)) {
 					return;
 				}
 			}
-			const bool hurry = a_actor->IsPlayerTeammate() || InHurry(a_actor);
+			const bool following = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
+			// teammates out of combat only take shortcuts while actually following (not while told to wait)
+			const bool hurry = following || ((!a_actor->IsPlayerTeammate() || a_actor->IsInCombat()) && InHurry(a_actor));
 			if (cfg.shortcut && hurry) {
 				if (caps.jumps && TryShortcut(a_actor, caps, a_plans)) {
 					return;
@@ -1626,7 +1662,7 @@ namespace JumpNav
 				if (cfg.route) {
 					if (a_actor->IsInCombat()) {
 						TryRoute(a_actor, caps, a_actor->GetActorRuntimeData().currentCombatTarget.get().get(), IsRanged(a_actor) ? 450.0f : 15.0f, m, navOk);
-					} else if (a_actor->IsPlayerTeammate()) {
+					} else if (following) {
 						TryRoute(a_actor, caps, RE::PlayerCharacter::GetSingleton(), 60.0f, m);
 					}
 				}

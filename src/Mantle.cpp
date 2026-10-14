@@ -76,7 +76,7 @@ namespace Mantle
 		for (float k : { 0.3f, 0.5f, 0.7f }) {
 			Raycast::Hit hit;
 			const V      from = P + V{ 0, 0, h * k };
-			if (ray.Cast(from, from + dir * maxWall, hit) && !Raycast::IsActorRef(hit.ref) && std::fabs(hit.normal.z) < 0.5f) {
+			if (ray.Cast(from, from + dir * maxWall, hit) && !Raycast::IsActorRef(hit.ref) && std::fabs(hit.normal.z) < 0.6f) {
 				const float d = (hit.point - from).Length();
 				if (d < best) {
 					best = d;
@@ -98,7 +98,7 @@ namespace Mantle
 		}
 		const V      in = wall.point - n * 14.0f;
 		Raycast::Hit top;
-		if (!ray.Cast({ in.x, in.y, P.z + h * 1.6f }, { in.x, in.y, P.z + 20.0f }, top) || top.normal.z < 0.7f || Raycast::IsActorRef(top.ref)) {
+		if (!ray.Cast({ in.x, in.y, P.z + h * 1.6f }, { in.x, in.y, P.z + 20.0f }, top) || top.normal.z < 0.6f || Raycast::IsActorRef(top.ref)) {
 			return false;
 		}
 		const float H = top.point.z - P.z;
@@ -128,7 +128,7 @@ namespace Mantle
 			}
 			float standZ = top.point.z;
 			if (!ray.Cast({ s.x, s.y, top.point.z + 30.0f }, { s.x, s.y, top.point.z - 12.0f }, tmp) ||
-				(!Raycast::IsActorRef(tmp.ref) && (std::fabs(tmp.point.z - top.point.z) > 10.0f || tmp.normal.z < 0.7f))) {
+				(!Raycast::IsActorRef(tmp.ref) && (std::fabs(tmp.point.z - top.point.z) > 16.0f || tmp.normal.z < 0.6f))) {
 				continue;
 			}
 			if (!Raycast::IsActorRef(tmp.ref)) {
