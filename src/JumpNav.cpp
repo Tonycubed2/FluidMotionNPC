@@ -23,6 +23,9 @@ namespace JumpNav
 		constexpr float kEvalInterval = 0.25f;
 		constexpr int   kPlansPerFrame = 2;
 		constexpr float kPostLandCheck = 0.4f;
+		constexpr float kSettleSec = 0.35f;
+		constexpr float kFollowStill = 0.5f;   // a follower that moved less than kStillDist for this long is stuck
+		constexpr float kStillDist = 40.0f;
 
 		const char* TriggerName(Trigger a_t)
 		{
@@ -188,7 +191,20 @@ namespace JumpNav
 				double     routeNext = 0;
 			double     nextPfLog = 0;
 			bool       forceStuck = false;
+			// Where the actor was when it last moved a real distance. A follower pressed against a rock keeps
+			// its run animation and jitters (velocity looks "moving"), but its position barely changes.
+			Vec        stillPos{};
+			double     stillT = 0;
+			bool       haveStill = false;
 		};
+
+		struct Settle
+		{
+			RE::FormID id;
+			double     until;
+			bool       npc;
+		};
+		std::vector<Settle> g_settles;
 
 		std::vector<Flight>                   g_flights;
 		std::unordered_map<RE::FormID, Memo>  g_memo;
@@ -693,7 +709,11 @@ namespace JumpNav
 				}
 
 				const float endErr = actor->GetPosition().GetDistance(f.end);
-				Drive(actor, f.yaw, f.end, { f.vel.x, f.vel.y, 0.0f }, false);
+				Drive(actor, f.yaw, f.end, { f.vel.x * 0.3f, f.vel.y * 0.3f, 0.0f }, false);
+				if (auto* cc = actor->GetCharController(); cc && cfg.driveMode == 0) {
+					cc->context.currentState = RE::hkpCharacterStateType::kOnGround;
+				}
+				g_settles.push_back({ f.id, g_time + kSettleSec, f.npc });
 				bool anim = false;
 				SendEvent(actor, f.npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
 				if (cfg.log) {
@@ -708,6 +728,35 @@ namespace JumpNav
 				m.postCheckAt = g_time + kPostLandCheck;
 				m.last = f;
 				it = g_flights.erase(it);
+			}
+		}
+
+		// For a moment after landing: no upward velocity (no bounce / second hop) and the jump state is closed.
+		void UpdateSettles()
+		{
+			const auto& cfg = Config::Get().jump;
+			for (auto it = g_settles.begin(); it != g_settles.end();) {
+				auto* actor = RE::TESForm::LookupByID<RE::Actor>(it->id);
+				if (g_time > it->until || !actor || !actor->Is3DLoaded() || actor->IsDead() || Mantle::Active(it->id) ||
+					std::ranges::any_of(g_flights, [&](const Flight& f) { return f.id == it->id; })) {
+					it = g_settles.erase(it);
+					continue;
+				}
+				if (auto* cc = actor->GetCharController(); cc && cfg.driveMode == 0) {
+					Vec v;
+					actor->GetLinearVelocity(v);
+					if (v.z > 0.0f) {
+						const float sc = RE::bhkWorld::GetWorldScale();
+						cc->SetLinearVelocityImpl(RE::hkVector4(v.x * sc, v.y * sc, 0.0f, 0.0f));
+					}
+					cc->fallStartHeight = actor->GetPosition().z;
+					cc->fallTime = 0.0f;
+				}
+				if (actor->IsInJumpState()) {
+					bool anim = false;
+					SendEvent(actor, it->npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
+				}
+				++it;
 			}
 		}
 
@@ -1379,7 +1428,7 @@ namespace JumpNav
 
 		void StartSearch(RE::Actor* a_actor, const Caps& a_caps, RE::TESObjectREFR* a_goal, float a_gap, bool stuck, float vanilla);
 
-		void TryRoute(RE::Actor* a_actor, const Caps& a_caps, RE::TESObjectREFR* a_goal, float a_gap, Memo& a_memo, bool a_navOk = false)
+		void TryRoute(RE::Actor* a_actor, const Caps& a_caps, RE::TESObjectREFR* a_goal, float a_gap, Memo& a_memo, bool a_navOk = false, float a_stillFor = 0.0f)
 		{
 			const auto& cfg = Config::Get().jump;
 			if (!a_goal || !a_goal->Is3DLoaded()) {
@@ -1409,20 +1458,16 @@ namespace JumpNav
 				return;
 			}
 			const bool follower = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
-			if (follower) {
-				Vec fv;
-				a_actor->GetLinearVelocity(fv);
-				if (dh < cfg.followRouteMin || Len2D(fv) > 50.0f) {
-					a_memo.rBestTime = g_time;
-					return;
-				}
+			if (follower && (dh < cfg.followRouteMin || a_stillFor < kFollowStill)) {
+				a_memo.rBestTime = g_time;
+				return;
 			}
 			Vec rv;
 			a_actor->GetLinearVelocity(rv);
-			if (Len2D(rv) > 100.0f) {
+			if (!follower && Len2D(rv) > 100.0f) {
 				a_memo.rBestTime = g_time;
 			}
-			const bool stuck = a_memo.forceStuck || mismatch || g_time - a_memo.rBestTime >= cfg.routeStuckSec;
+			const bool stuck = a_memo.forceStuck || mismatch || g_time - a_memo.rBestTime >= (follower ? cfg.followStuckSec : cfg.routeStuckSec);
 			float      vanilla = 0;
 			if (follower && !stuck) {
 				return;
@@ -1523,7 +1568,7 @@ namespace JumpNav
 			StartSearch(a_actor, a_caps, goal, a_g.gap - a_caps.radius - 40.0f, true, 0.0f);
 		}
 
-		bool TryShortcut(RE::Actor* a_actor, const Caps& a_caps, int& a_plans)
+		bool TryShortcut(RE::Actor* a_actor, const Caps& a_caps, int& a_plans, float a_minSaving, float a_minRatio)
 		{
 			const auto& cfg = Config::Get().jump;
 			auto        pr = PathProbe::GetPathRef(a_actor);
@@ -1560,7 +1605,7 @@ namespace JumpNav
 				}
 				const float d3 = d.Length();
 				const float saving = arc[j] - d3;
-				if (saving < cfg.minSaving || arc[j] < cfg.minRatio * d3) {
+				if (saving < a_minSaving || arc[j] < a_minRatio * d3) {
 					continue;
 				}
 				--a_plans;
@@ -1609,7 +1654,7 @@ namespace JumpNav
 				return false;
 			}
 
-			if (d.z > 0.0f && dh < 180.0f && a_caps.npc && !Mantle::Active(a_actor->GetFormID())) {
+			if (d.z > 0.0f && a_caps.npc && !Mantle::Active(a_actor->GetFormID())) {
 				const Vec toward = dh > 1.0f ? Vec{ d.x / dh, d.y / dh, 0.0f } : Vec{ 0, 1, 0 };
 				if (Mantle::TryStart(a_actor, false, &toward, 90.0f, 85.0f) || (a_caps.jumps && Mantle::TryStart(a_actor, true, &toward, 90.0f, 85.0f))) {
 					if (cfg.log) {
@@ -1696,7 +1741,17 @@ namespace JumpNav
 			}
 			const bool following = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
 			auto*      player = RE::PlayerCharacter::GetSingleton();
-			const bool followerClose = following && Len2D(player->GetPosition() - a_actor->GetPosition()) < cfg.followRouteMin;
+			const float playerDist = Len2D(player->GetPosition() - a_actor->GetPosition());
+			const bool followerClose = following && playerDist < cfg.followRouteMin;
+			{
+				const Vec here = a_actor->GetPosition();
+				if (!m.haveStill || (here - m.stillPos).Length() > kStillDist) {
+					m.stillPos = here;
+					m.stillT = g_time;
+					m.haveStill = true;
+				}
+			}
+			const float stillFor = static_cast<float>(g_time - m.stillT);
 
 			if (!caps.jumps) {
 			} else if (a_actor->IsInCombat()) {
@@ -1706,12 +1761,27 @@ namespace JumpNav
 					}
 				}
 			} else if (cfg.follow && following) {
-				// Catch-up jump only when the follower really is stuck: standing still and the navmesh can't get it
-				// to the player. A follower walking up stairs behind the player keeps pace without closing the gap,
-				// which used to look "stuck" and made it jump on stairs.
-				Vec fv;
-				a_actor->GetLinearVelocity(fv);
-				if (Len2D(fv) < 50.0f && !NavReaches(a_actor, player->GetPosition()) &&
+				// A follower that has not really moved for a moment (pressed against a rock or ledge, or standing
+				// still) while the player is away first tries to climb what is in front of it, toward the player
+				// and then the way it faces. A follower walking up stairs behind the player keeps moving, so it
+				// never counts as stuck.
+				if (stillFor >= kFollowStill && playerDist > 200.0f && caps.npc && !Mantle::Active(a_actor->GetFormID())) {
+					const Vec   tp = player->GetPosition() - a_actor->GetPosition();
+					const float tl = Len2D(tp);
+					const Vec   toward = tl > 1.0f ? Vec{ tp.x / tl, tp.y / tl, 0.0f } : Vec{ 0, 1, 0 };
+					if (tp.z > -60.0f && (Mantle::TryStart(a_actor, false, &toward, 90.0f, 85.0f) || Mantle::TryStart(a_actor, false, nullptr, 75.0f, 85.0f))) {
+						if (cfg.log) {
+							auto* n = a_actor->GetName();
+							logger::info("[{}] FOLLOWCLIMB {:08X} '{}' still={:.1f}s dist={:.0f} dz={:+.0f}", Tuning::ModeLabel(), a_actor->GetFormID(), n ? n : "",
+								stillFor, playerDist, tp.z);
+						}
+						m.cooldownUntil = g_time + 0.8;
+						m.stillT = g_time;
+						return;
+					}
+				}
+				// Catch-up jump only when stuck and the navmesh can't get it to the player.
+				if (stillFor >= kFollowStill && !NavReaches(a_actor, player->GetPosition()) &&
 					TryReach(a_actor, caps, player, Trigger::kFollow, cfg.followStuckSec, 100.0f, 60.0f, m, a_plans)) {
 					return;
 				}
@@ -1720,7 +1790,9 @@ namespace JumpNav
 			const bool hurry = following || ((!a_actor->IsPlayerTeammate() || a_actor->IsInCombat()) && InHurry(a_actor));
 			if (cfg.shortcut && hurry) {
 				// a follower close behind the player walks (stairs, switchbacks); shortcut jumps are for catching up
-				if (caps.jumps && !followerClose && (!a_actor->IsInCombat() || perceived) && TryShortcut(a_actor, caps, a_plans)) {
+				const float minSaving = following ? cfg.followMinSaving : cfg.minSaving;
+				const float minRatio = following ? cfg.followMinRatio : cfg.minRatio;
+				if (caps.jumps && !followerClose && (!a_actor->IsInCombat() || perceived) && TryShortcut(a_actor, caps, a_plans, minSaving, minRatio)) {
 					return;
 				}
 				if (cfg.route) {
@@ -1729,7 +1801,7 @@ namespace JumpNav
 							TryRoute(a_actor, caps, combatTgt.get(), IsRanged(a_actor) ? 450.0f : 15.0f, m, navOk);
 						}
 					} else if (following) {
-						TryRoute(a_actor, caps, player, 60.0f, m);
+						TryRoute(a_actor, caps, player, 60.0f, m, false, stillFor);
 					}
 				}
 			}
@@ -1767,6 +1839,7 @@ namespace JumpNav
 
 			UpdateFlights(a_dt);
 			UpdateLandPoses();
+			UpdateSettles();
 			UpdateGlides(a_dt);
 			PostLandChecks();
 			LogStatsIfDue();
@@ -1838,6 +1911,7 @@ namespace JumpNav
 		g_glides.clear();
 		g_searches.clear();
 		g_memo.clear();
+		g_settles.clear();
 		g_raceExcluded.clear();
 	}
 

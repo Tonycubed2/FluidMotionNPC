@@ -40,7 +40,9 @@ namespace Config
 		float driveTurnScale = 1.0f;
 		float glideAccel = 700.0f;
 		float pursuitStuckSec = 1.0f;
-		float followStuckSec = 2.0f;
+		float followStuckSec = 1.0f;
+		float followMinSaving = 200.0f;
+		float followMinRatio = 1.4f;
 		float pursuitMinRise = 70.0f;
 		float pursuitMinDrop = 120.0f;
 		float meleeRise = 0.75f;

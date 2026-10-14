@@ -97,9 +97,18 @@ namespace Mantle
 		if (n.x * -dir.x + n.y * -dir.y < 0.35f) {
 			return false;
 		}
-		const V      in = wall.point - n * 14.0f;
+		// Top of the obstacle, probed a little behind the edge. Rounded rock tops are often too sloped right at
+		// the lip, so a second probe further in is tried before giving up.
 		Raycast::Hit top;
-		if (!ray.Cast({ in.x, in.y, P.z + h * 1.6f }, { in.x, in.y, P.z + 20.0f }, top) || top.normal.z < 0.6f || Raycast::IsActorRef(top.ref)) {
+		bool         haveTop = false;
+		for (float depth : { 14.0f, 26.0f }) {
+			const V in = wall.point - n * depth;
+			if (ray.Cast({ in.x, in.y, P.z + h * 1.6f }, { in.x, in.y, P.z + 20.0f }, top) && top.normal.z >= 0.5f && !Raycast::IsActorRef(top.ref)) {
+				haveTop = true;
+				break;
+			}
+		}
+		if (!haveTop) {
 			return false;
 		}
 		const float H = top.point.z - P.z;
@@ -129,7 +138,7 @@ namespace Mantle
 			}
 			float standZ = top.point.z;
 			if (!ray.Cast({ s.x, s.y, top.point.z + 30.0f }, { s.x, s.y, top.point.z - 12.0f }, tmp) ||
-				(!Raycast::IsActorRef(tmp.ref) && (std::fabs(tmp.point.z - top.point.z) > 16.0f || tmp.normal.z < 0.6f))) {
+				(!Raycast::IsActorRef(tmp.ref) && (std::fabs(tmp.point.z - top.point.z) > 24.0f || tmp.normal.z < 0.5f))) {
 				continue;
 			}
 			if (!Raycast::IsActorRef(tmp.ref)) {

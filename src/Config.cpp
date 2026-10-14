@@ -88,6 +88,8 @@ namespace Config
 		getf("fDriveFall", j.driveFall);
 		getf("fPursuitStuckSec", j.pursuitStuckSec);
 		getf("fFollowStuckSec", j.followStuckSec);
+		getf("fFollowMinSaving", j.followMinSaving);
+		getf("fFollowMinRatio", j.followMinRatio);
 		getf("fPursuitMinRise", j.pursuitMinRise);
 		getf("fPursuitMinDrop", j.pursuitMinDrop);
 		getf("fMeleeRise", j.meleeRise);
