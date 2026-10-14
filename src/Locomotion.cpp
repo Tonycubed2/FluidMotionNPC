@@ -598,9 +598,18 @@ namespace Locomotion
 
 		bool InstallJobHook()
 		{
-			const auto  fn = REL::ID{ 41370 }.address();
-			const auto  site = fn + 0x13E;
-			const auto  orig = REL::ID{ 41453 }.address();
+			// The function that queues one animation-update job per NPC, and the job it queues
+			// (RunOneActorAnimationUpdateJob). The queue call passes the job with "lea rdx, [job]".
+			//   SE 1.5.97: 40357 + 0x152 -> 40436   (matched against SkyrimSE.exe 1.5.97 by structure)
+			//   AE       : 41370 + 0x13E -> 41453
+			if (REL::Module::IsVR()) {
+				logger::warn("Locomotion: NPC animation job hook has no VR address - jobs not hooked");
+				return false;
+			}
+			const bool  se = REL::Module::IsSE();
+			const auto  fn = REL::ID{ se ? 40357u : 41370u }.address();
+			const auto  site = fn + (se ? 0x152 : 0x13E);
+			const auto  orig = REL::ID{ se ? 40436u : 41453u }.address();
 			const auto* p = reinterpret_cast<const std::uint8_t*>(site);
 			if (p[0] != 0x48 || p[1] != 0x8D || p[2] != 0x15 ||
 				site + 7 + *reinterpret_cast<const std::int32_t*>(p + 3) != orig) {
