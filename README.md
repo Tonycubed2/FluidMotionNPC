@@ -42,4 +42,6 @@ Put CommonLibSSE-NG in `lib/commonlibsse-ng`, then `xmake f -p windows -m releas
 
 ## License
 
-GPL-3.0, same as the original (see LICENSE). If you distribute a build you must also provide this source.
+GPL-3.0 (see `LICENSE`), same as the original Fluid Motion. See `NOTICE.md` for copyright and the list of changes,
+`CommonLibSSE-NG-EXCEPTIONS.md` for CommonLibSSE-NG's license exceptions, and `THIRD_PARTY_NOTICES.md` for the
+other libraries compiled into the DLL. Release archives include all four files.
