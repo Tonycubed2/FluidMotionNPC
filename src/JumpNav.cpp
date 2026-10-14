@@ -88,6 +88,11 @@ namespace JumpNav
 				return false;
 			}
 			auto* race = a_actor->GetRace();
+			// Horses are managed by horse/follower mods (Immersive Horses etc.) and their graph doesn't take the
+			// NPC move events, so moving them by hand glides. Never touch them.
+			if (race && (race->HasKeywordString("ActorTypeHorse") || std::string_view(race->formEditorID.c_str()).find("Horse") != std::string_view::npos)) {
+				return false;
+			}
 			const int raceFlags = RaceFlags(race);
 			if (raceFlags & 2) {
 				return false;
@@ -536,36 +541,48 @@ namespace JumpNav
 			return cur + (std::clamp)(WrapPi(a_yaw - cur), -lim, lim);
 		}
 
+		constexpr float kMaxDriveSpeed = 550.0f;  // u/s, a little above a sprinting human
+
 		struct Motion
 		{
 			float run, rotStand, rotMove;
 		};
 
+		// Speeds for actors moved by hand (route legs). Read from the race's run movement-type record (form
+		// data, same layout on every runtime) instead of the live AI process data, scaled by SpeedMult and
+		// clamped, so a bad read can never drive an actor faster than a sprinting human.
 		Motion RaceMotion(RE::Actor* a_actor)
 		{
 			const auto& cfg = Config::Get().jump;
-			Motion      m{ cfg.glideSpeed, cfg.turnRateDeg, cfg.turnRateDeg };
+			Motion      m{ (std::min)(cfg.glideSpeed, kMaxDriveSpeed), cfg.turnRateDeg, cfg.turnRateDeg };
 			if (!cfg.raceMotion) {
 				return m;
 			}
-			auto* proc = a_actor->GetActorRuntimeData().currentProcess;
-			auto* hi = proc ? proc->high : nullptr;
-			if (!hi) {
+			auto* race = a_actor->GetRace();
+			auto* mt = race ? race->baseMoveTypes[RE::TESRace::MovementTypes::kRun] : nullptr;
+			if (!mt && race) {
+				mt = race->baseMoveTypes[RE::TESRace::MovementTypes::kWalk];
+			}
+			if (!mt) {
 				return m;
 			}
 			using namespace RE::Movement;
-			const auto& d = hi->currentMovementType.defaultData;
+			const auto&     d = mt->movementTypeData.defaultData;
 			constexpr float kDeg = 57.29578f;
-			const float     run = d.speeds[SPEED_DIRECTIONS::kForward][MaxSpeeds::kRun];
-			const float     stand = d.speeds[SPEED_DIRECTIONS::kRotations][MaxSpeeds::kRun] * kDeg * cfg.driveTurnScale;
-			const float     move = d.rotateWhileMovingRun * kDeg * cfg.driveTurnScale;
-			if (run > 50.0f && run < 1500.0f) {
-				m.run = run;
+			float           mult = 1.0f;
+			if (auto* avo = a_actor->AsActorValueOwner()) {
+				mult = std::clamp(avo->GetActorValue(RE::ActorValue::kSpeedMult) / 100.0f, 0.5f, 1.5f);
 			}
-			if (stand > 20.0f) {
+			const float run = d.speeds[SPEED_DIRECTIONS::kForward][MaxSpeeds::kRun] * mult;
+			const float stand = d.speeds[SPEED_DIRECTIONS::kRotations][MaxSpeeds::kRun] * kDeg * cfg.driveTurnScale;
+			const float move = d.rotateWhileMovingRun * kDeg * cfg.driveTurnScale;
+			if (run > 50.0f && run < 2000.0f) {
+				m.run = (std::min)(run, kMaxDriveSpeed);
+			}
+			if (stand > 20.0f && stand < 2000.0f) {
 				m.rotStand = stand;
 			}
-			if (move > 20.0f) {
+			if (move > 20.0f && move < 2000.0f) {
 				m.rotMove = (std::min)(move, m.rotStand);
 			}
 			return m;
