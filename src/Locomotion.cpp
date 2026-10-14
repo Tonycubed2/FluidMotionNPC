@@ -600,16 +600,24 @@ namespace Locomotion
 		{
 			// The function that queues one animation-update job per NPC, and the job it queues
 			// (RunOneActorAnimationUpdateJob). The queue call passes the job with "lea rdx, [job]".
-			//   SE 1.5.97: 40357 + 0x152 -> 40436   (matched against SkyrimSE.exe 1.5.97 by structure)
-			//   AE       : 41370 + 0x13E -> 41453
+			// Each was matched by structure against that runtime's SkyrimSE.exe / SkyrimVR.exe:
+			//   SE 1.5.97       : 40357 + 0x152 -> 40436
+			//   AE (1.6.x/1.7.x): 41370 + 0x13E -> 41453   (checked on 1.7.99 and 1.7.104 too)
+			//   VR 1.4.15       : image+0x702c70 + 0x156 -> image+0x7087b0
+			std::uintptr_t fn = 0, site = 0, orig = 0;
 			if (REL::Module::IsVR()) {
-				logger::warn("Locomotion: NPC animation job hook has no VR address - jobs not hooked");
-				return false;
+				fn = REL::Offset{ 0x702c70 }.address();
+				site = fn + 0x156;
+				orig = REL::Offset{ 0x7087b0 }.address();
+			} else if (REL::Module::IsSE()) {
+				fn = REL::ID{ 40357 }.address();
+				site = fn + 0x152;
+				orig = REL::ID{ 40436 }.address();
+			} else {
+				fn = REL::ID{ 41370 }.address();
+				site = fn + 0x13E;
+				orig = REL::ID{ 41453 }.address();
 			}
-			const bool  se = REL::Module::IsSE();
-			const auto  fn = REL::ID{ se ? 40357u : 41370u }.address();
-			const auto  site = fn + (se ? 0x152 : 0x13E);
-			const auto  orig = REL::ID{ se ? 40436u : 41453u }.address();
 			const auto* p = reinterpret_cast<const std::uint8_t*>(site);
 			if (p[0] != 0x48 || p[1] != 0x8D || p[2] != 0x15 ||
 				site + 7 + *reinterpret_cast<const std::int32_t*>(p + 3) != orig) {

@@ -41,8 +41,10 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 
 	const auto ver = a_skse->RuntimeVersion();
 	logger::info("FluidMotionNPC (NPC terrain traversal) loaded, game runtime {}", ver.string());
-	if (ver != SKSE::RUNTIME_SSE_1_6_1170 && ver != SKSE::RUNTIME_SSE_1_5_97) {
-		logger::warn("FluidMotionNPC was checked against 1.5.97 and 1.6.1170; on other runtimes some hooks may refuse to install (see the lines below)");
+	const bool checked = ver == SKSE::RUNTIME_SSE_1_5_97 || ver == SKSE::RUNTIME_SSE_1_6_1170 || ver == SKSE::RUNTIME_SSE_1_7_99 ||
+	                     ver == SKSE::RUNTIME_SSE_1_7_104 || ver == SKSE::RUNTIME_VR_1_4_15;
+	if (!checked) {
+		logger::warn("FluidMotionNPC was checked against 1.5.97, 1.6.1170, 1.7.99, 1.7.104 and VR 1.4.15; on this runtime some hooks may refuse to install (see the lines below)");
 	}
 
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);

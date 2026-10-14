@@ -29,7 +29,8 @@ namespace FrameHook
 	void Install()
 	{
 		REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
-		PlayerUpdate::func = vtbl.write_vfunc(0xAD, PlayerUpdate::thunk);
+		// Actor::Update is slot 0xAD on SE/AE and 0xAF on VR (VR inserts two virtuals before it).
+		PlayerUpdate::func = vtbl.write_vfunc(REL::Module::IsVR() ? 0xAF : 0xAD, PlayerUpdate::thunk);
 		logger::info("FrameHook: per-frame tick installed");
 	}
 }
