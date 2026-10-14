@@ -45,3 +45,18 @@ Put CommonLibSSE-NG in `lib/commonlibsse-ng`, then `xmake f -p windows -m releas
 GPL-3.0 (see `LICENSE`), same as the original Fluid Motion. See `NOTICE.md` for copyright and the list of changes,
 `CommonLibSSE-NG-EXCEPTIONS.md` for CommonLibSSE-NG's license exceptions, and `THIRD_PARTY_NOTICES.md` for the
 other libraries compiled into the DLL. Release archives include all four files.
+
+## API for other plugins
+
+`include/FluidMotionNPC_API.h` is a single header other SKSE plugins can copy. It resolves
+FluidMotionNPC's exports at runtime (no link dependency) and lets a plugin:
+
+- `IsTraversing(formID)` - is FluidMotionNPC moving this actor right now (jump arc, route leg, climb)?
+- `Claim(formID, seconds)` - leave this actor alone: no new jumps, routes, climbs or hangs; current route dropped. Refresh it while you need it; `0` releases it.
+- `SetMaxTurnRate(formID, degPerSec, seconds)` - cap how fast FluidMotionNPC turns this actor while it drives it.
+- `OnNavmesh(actor, target)` - can the actor reach the target on the navmesh?
+- `NoteDriven(formID, speed)` - tell the speed channel this actor is being moved by hand at this speed.
+- `RegisterPostGraph(fn)` - `fn(actor, src)` after every NPC's animation graph update (src 0 = animation worker thread, 1 = main thread).
+- `RegisterFrame(fn)` - `fn(dt)` once per frame on the main thread.
+
+FluidMotionSpiders uses this API.

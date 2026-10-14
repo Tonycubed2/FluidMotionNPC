@@ -1,4 +1,5 @@
 #include "Mantle.h"
+#include "Api.h"
 #include "ClimbClip.h"
 #include "Locomotion.h"
 #include "Tuning.h"
@@ -213,7 +214,7 @@ namespace Mantle
 	bool TryStart(RE::Actor* a, bool a_air, const V* a_dir, float a_maxWall, float a_window)
 	{
 		const auto& cfg = Config::Get().anim;
-		if (!Locomotion::Settings().enabled || !Locomotion::Settings().npcs || !cfg.climb || a->IsPlayerRef() || (a_air && !cfg.hang) || Active(a->GetFormID()) || !CanClimb(a)) {
+		if (!Locomotion::Settings().enabled || !Locomotion::Settings().npcs || !cfg.climb || a->IsPlayerRef() || (a_air && !cfg.hang) || Active(a->GetFormID()) || Api::Claimed(a->GetFormID()) || !CanClimb(a)) {
 			return false;
 		}
 		if (auto it = g_cool.find(a->GetFormID()); it != g_cool.end() && g_time < it->second) {

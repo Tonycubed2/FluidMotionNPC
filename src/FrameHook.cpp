@@ -1,4 +1,5 @@
 #include "FrameHook.h"
+#include "Api.h"
 #include "JumpNav.h"
 #include "Locomotion.h"
 
@@ -49,6 +50,7 @@ namespace FrameHook
 
 				JumpNav::OnFrame(dt);
 				Locomotion::OnFrame(dt);
+				Api::RunFrame(dt);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};

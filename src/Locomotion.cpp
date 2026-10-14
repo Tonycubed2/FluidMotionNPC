@@ -9,6 +9,7 @@
 // removed again shortly after. Outside of a traversal the NPC skeleton is never touched.
 
 #include "Locomotion.h"
+#include "Api.h"
 #include "AnimMath.h"
 #include "ClimbClip.h"
 #include "JumpNav.h"
@@ -594,6 +595,9 @@ namespace Locomotion
 			if (slot && Active() && !deferred) {
 				Post(a, *slot, 0.0f);
 			}
+			if (a && !a->IsPlayerRef()) {
+				Api::RunPostGraph(a, 0);
+			}
 		}
 
 		bool InstallJobHook()
@@ -650,6 +654,7 @@ namespace Locomotion
 				if (slot && !AfterGraph(a_this, *slot) && Active()) {
 					Post(a_this, *slot, a_dt);
 				}
+				Api::RunPostGraph(a_this, 1);
 			}
 			static inline REL::Relocation<decltype(thunk)> func;
 		};
@@ -690,7 +695,7 @@ namespace Locomotion
 				const auto* st = a_actor->AsActorState();
 				const bool  normal = !a_actor->IsDead() && !a_actor->IsInRagdollState() && !a_actor->IsInKillMove() && !a_actor->IsOnMount() && st &&
 				                    !st->IsFlying() && !st->IsSwimming() && !st->IsBleedingOut() && st->GetSitSleepState() == RE::SIT_SLEEP_STATE::kNormal;
-				const bool  busy = JumpNav::InFlight(s.id) || Mantle::Active(s.id);
+				const bool  busy = JumpNav::InFlight(s.id) || Mantle::Active(s.id) || Api::Claimed(s.id);
 				const bool  moving = s.cmdSpeed > 60.0f && now - s.cmdT < 0.2f && g_frame.load() - s.drivenFrame > 2;
 				// in a hurry (combat, fleeing, running) or a follower keeping up with the player
 				tryClimb = c.climb && normal && grounded && !busy && moving && (JumpNav::InHurry(a_actor) || JumpNav::IsFollowingPlayer(a_actor));

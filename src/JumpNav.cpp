@@ -1,4 +1,5 @@
 #include "JumpNav.h"
+#include "Api.h"
 #include "Locomotion.h"
 #include "ClimbClip.h"
 #include "Mantle.h"
@@ -555,6 +556,9 @@ namespace JumpNav
 		{
 			const float cur = a_actor->GetHeading(false);
 			float       rate = a_rateDeg > 0.0f ? a_rateDeg : Config::Get().jump.turnRateDeg;
+			if (const float cap = Api::MaxTurn(a_actor->GetFormID()); cap > 0.0f) {
+				rate = (std::min)(rate, cap);
+			}
 			const float lim = rate * 0.0174533f * g_dt;
 			return cur + (std::clamp)(WrapPi(a_yaw - cur), -lim, lim);
 		}
@@ -1166,6 +1170,8 @@ namespace JumpNav
 				if (!actor || actor->IsDead() || !actor->Is3DLoaded() || actor->IsInRagdollState() ||
 					(actor->AsActorState() && actor->AsActorState()->GetKnockState() != RE::KNOCK_STATE_ENUM::kNormal)) {
 					drop = "lost";
+				} else if (Api::Claimed(g.id)) {
+					drop = "claimed";  // another plugin (e.g. FluidMotionSpiders) took over this actor
 				} else if (g_time > g.until) {
 					drop = "timeout";
 				} else if (actor->IsInCombat() && g_time >= g.seeNext &&
@@ -1654,6 +1660,9 @@ namespace JumpNav
 		void Evaluate(RE::Actor* a_actor, int& a_plans)
 		{
 			const auto& cfg = Config::Get().jump;
+			if (Api::Claimed(a_actor->GetFormID())) {
+				return;
+			}
 			auto&       m = g_memo[a_actor->GetFormID()];
 			if (g_time < m.nextEval || g_time < m.cooldownUntil) {
 				return;

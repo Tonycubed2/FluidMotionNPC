@@ -1,6 +1,7 @@
 // FluidMotionNPC - NPC terrain traversal only (jumps, routes over obstacles, climbing, ledge hangs).
 // A stripped fork of "Fluid Motion: Pathfinding Overhaul" by megakuutti (GPL-3.0).
 
+#include "Api.h"
 #include "Config.h"
 #include "FrameHook.h"
 #include "JumpNav.h"
@@ -28,6 +29,7 @@ namespace
 			Locomotion::Reset();
 			Locomotion::Reload();
 			JumpNav::Reset();
+			Api::Reset();
 			break;
 		default:
 			break;
