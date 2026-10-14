@@ -692,7 +692,8 @@ namespace Locomotion
 				                    !st->IsFlying() && !st->IsSwimming() && !st->IsBleedingOut() && st->GetSitSleepState() == RE::SIT_SLEEP_STATE::kNormal;
 				const bool  busy = JumpNav::InFlight(s.id) || Mantle::Active(s.id);
 				const bool  moving = s.cmdSpeed > 60.0f && now - s.cmdT < 0.2f && g_frame.load() - s.drivenFrame > 2;
-				tryClimb = c.climb && normal && grounded && !busy && moving && JumpNav::InHurry(a_actor);
+				// in a hurry (combat, fleeing, running) or a follower keeping up with the player
+				tryClimb = c.climb && normal && grounded && !busy && moving && (JumpNav::InHurry(a_actor) || JumpNav::IsFollowingPlayer(a_actor));
 				climbReach = s.speedH < 40.0f ? 75.0f : 48.0f;
 				tryHang = c.climb && c.hang && normal && !grounded && cc && !JumpNav::InFlight(s.id) && now - s.airStart > 0.05f &&
 				          now - s.airStart < 1.8f && s.vel.z > -250.0f && moving;

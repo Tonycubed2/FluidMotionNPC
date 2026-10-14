@@ -32,7 +32,7 @@ namespace Config
 		float maxSpeed = 600.0f;
 		float clearance = 12.0f;
 		float cooldown = 1.5f;
-		float followRouteMin = 500.0f;
+		float followRouteMin = 350.0f;
 		float turnRateDeg = 420.0f;
 		float driveRise = 220.0f;
 		float driveFall = 500.0f;

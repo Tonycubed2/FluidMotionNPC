@@ -93,6 +93,11 @@ namespace JumpNav
 			if (race && (race->HasKeywordString("ActorTypeHorse") || std::string_view(race->formEditorID.c_str()).find("Horse") != std::string_view::npos)) {
 				return false;
 			}
+			// Giants (and anything giant-sized) are left completely vanilla.
+			if (a_actor->GetHeight() >= Config::Get().jump.giantHeight ||
+				(race && std::string_view(race->formEditorID.c_str()).find("Giant") != std::string_view::npos)) {
+				return false;
+			}
 			const int raceFlags = RaceFlags(race);
 			if (raceFlags & 2) {
 				return false;
@@ -450,11 +455,24 @@ namespace JumpNav
 			return tgt && tgt.get() == RE::PlayerCharacter::GetSingleton();
 		}
 
+		// An attacker may only be routed/jumped toward a target it actually perceives. Routes aim at the target's
+		// real position, so without this an enemy would home in on an invisible or hidden player.
+		bool Perceives(RE::Actor* a_actor, RE::Actor* a_target)
+		{
+			if (!a_actor || !a_target) {
+				return false;
+			}
+			if (auto* avo = a_target->AsActorValueOwner(); avo && avo->GetActorValue(RE::ActorValue::kInvisibility) > 0.0f) {
+				return false;
+			}
+			return a_actor->RequestDetectionLevel(a_target) > 0;
+		}
+
 		// Route legs move the actor by hand. The graph only plays its run/walk loop when it is in its
 		// movement state, which the engine enters on "moveStart" - sent by the AI when *it* starts moving.
 		// A follower routed because vanilla can't reach the player is standing still, so without this the
-		// graph stays idle and the actor glides. Re-sent every second (a no-op while already moving) in case
-		// the AI sends its own moveStop mid-route.
+		// graph stays idle and the actor glides. Re-sent every 0.3 s (a no-op while already moving) in case
+		// the AI (combat in particular) drops the graph out of its movement state mid-route.
 		void RouteAnimMove(RE::Actor* a_actor, bool& a_on, double& a_next, double a_now, bool a_log, RE::FormID a_id)
 		{
 			if (a_on && a_now < a_next) {
@@ -465,7 +483,7 @@ namespace JumpNav
 				logger::info("ROUTEANIM {:08X} moveStart accepted={} aiMoving={}", a_id, accepted, a_actor->IsMoving());
 			}
 			a_on = true;
-			a_next = a_now + 1.0;
+			a_next = a_now + 0.3;
 		}
 
 		// End of a route: put the graph back to idle, unless the actor's own AI is moving (then the AI owns it).
@@ -775,6 +793,7 @@ namespace JumpNav
 			double          wpTime = 0;
 			bool            animOn = false;   // we sent moveStart for this route
 			double          animNext = 0;     // next moveStart refresh
+			double          seeNext = 0;      // next perception check (combat routes)
 		};
 
 		std::vector<Search> g_searches;
@@ -1149,6 +1168,9 @@ namespace JumpNav
 					drop = "lost";
 				} else if (g_time > g.until) {
 					drop = "timeout";
+				} else if (actor->IsInCombat() && g_time >= g.seeNext &&
+						   (g.seeNext = g_time + 0.5, !Perceives(actor, RE::TESForm::LookupByID<RE::Actor>(g.goalId)))) {
+					drop = "lost";  // target became invisible or undetected: stop homing in on it
 				} else if (!actor->IsInCombat() && !FollowingPlayer(actor)) {
 					drop = "calm";
 				} else if (!actor->IsInCombat() && Len2D(RE::PlayerCharacter::GetSingleton()->GetPosition() - actor->GetPosition()) < 0.6f * cfg.followRouteMin) {
@@ -1394,7 +1416,7 @@ namespace JumpNav
 			if (Len2D(rv) > 100.0f) {
 				a_memo.rBestTime = g_time;
 			}
-			const bool stuck = a_memo.forceStuck || mismatch || g_time - a_memo.rBestTime >= (follower ? 2.0f * cfg.routeStuckSec : cfg.routeStuckSec);
+			const bool stuck = a_memo.forceStuck || mismatch || g_time - a_memo.rBestTime >= cfg.routeStuckSec;
 			float      vanilla = 0;
 			if (follower && !stuck) {
 				return;
@@ -1656,31 +1678,49 @@ namespace JumpNav
 					navOk = true;
 				}
 			}
+			// In combat, only chase a target the actor can actually perceive (not invisible, not hidden by sneaking).
+			RE::NiPointer<RE::Actor> combatTgt;
+			bool                     perceived = false;
+			if (a_actor->IsInCombat()) {
+				combatTgt = a_actor->GetActorRuntimeData().currentCombatTarget.get();
+				perceived = Perceives(a_actor, combatTgt.get());
+			}
+			const bool following = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
+			auto*      player = RE::PlayerCharacter::GetSingleton();
+			const bool followerClose = following && Len2D(player->GetPosition() - a_actor->GetPosition()) < cfg.followRouteMin;
+
 			if (!caps.jumps) {
 			} else if (a_actor->IsInCombat()) {
-				if (cfg.pursuit && !IsRanged(a_actor) && !navOk) {
-					auto tgt = a_actor->GetActorRuntimeData().currentCombatTarget.get();
-					if (TryReach(a_actor, caps, tgt.get(), Trigger::kPursuit, cfg.pursuitStuckSec, cfg.pursuitMinRise, 15.0f, m, a_plans)) {
+				if (cfg.pursuit && perceived && !IsRanged(a_actor) && !navOk) {
+					if (TryReach(a_actor, caps, combatTgt.get(), Trigger::kPursuit, cfg.pursuitStuckSec, cfg.pursuitMinRise, 15.0f, m, a_plans)) {
 						return;
 					}
 				}
-			} else if (cfg.follow && FollowingPlayer(a_actor)) {
-				if (TryReach(a_actor, caps, RE::PlayerCharacter::GetSingleton(), Trigger::kFollow, cfg.followStuckSec, 100.0f, 60.0f, m, a_plans)) {
+			} else if (cfg.follow && following) {
+				// Catch-up jump only when the follower really is stuck: standing still and the navmesh can't get it
+				// to the player. A follower walking up stairs behind the player keeps pace without closing the gap,
+				// which used to look "stuck" and made it jump on stairs.
+				Vec fv;
+				a_actor->GetLinearVelocity(fv);
+				if (Len2D(fv) < 50.0f && !NavReaches(a_actor, player->GetPosition()) &&
+					TryReach(a_actor, caps, player, Trigger::kFollow, cfg.followStuckSec, 100.0f, 60.0f, m, a_plans)) {
 					return;
 				}
 			}
-			const bool following = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
 			// teammates out of combat only take shortcuts while actually following (not while told to wait)
 			const bool hurry = following || ((!a_actor->IsPlayerTeammate() || a_actor->IsInCombat()) && InHurry(a_actor));
 			if (cfg.shortcut && hurry) {
-				if (caps.jumps && TryShortcut(a_actor, caps, a_plans)) {
+				// a follower close behind the player walks (stairs, switchbacks); shortcut jumps are for catching up
+				if (caps.jumps && !followerClose && (!a_actor->IsInCombat() || perceived) && TryShortcut(a_actor, caps, a_plans)) {
 					return;
 				}
 				if (cfg.route) {
 					if (a_actor->IsInCombat()) {
-						TryRoute(a_actor, caps, a_actor->GetActorRuntimeData().currentCombatTarget.get().get(), IsRanged(a_actor) ? 450.0f : 15.0f, m, navOk);
+						if (perceived) {
+							TryRoute(a_actor, caps, combatTgt.get(), IsRanged(a_actor) ? 450.0f : 15.0f, m, navOk);
+						}
 					} else if (following) {
-						TryRoute(a_actor, caps, RE::PlayerCharacter::GetSingleton(), 60.0f, m);
+						TryRoute(a_actor, caps, player, 60.0f, m);
 					}
 				}
 			}
@@ -1760,6 +1800,11 @@ namespace JumpNav
 				std::erase_if(g_memo, [&](const auto& kv) { return !live.contains(kv.first) && kv.second.postCheckAt == 0 && g_time > kv.second.cooldownUntil; });
 			}
 		}
+	}
+
+	bool IsFollowingPlayer(RE::Actor* a_actor)
+	{
+		return a_actor && !a_actor->IsInCombat() && FollowingPlayer(a_actor);
 	}
 
 	bool InHurry(RE::Actor* a_actor)

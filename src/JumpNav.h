@@ -28,6 +28,7 @@ namespace JumpNav
 	bool  InFlight(RE::FormID a_id);
 	int   TraceState(RE::FormID a_id);
 	bool  InHurry(RE::Actor* a_actor);
+	bool  IsFollowingPlayer(RE::Actor* a_actor);
 	Stats GetStats();
 
 	struct DebugArc
