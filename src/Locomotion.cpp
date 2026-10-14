@@ -791,7 +791,18 @@ namespace Locomotion
 
 	void NoteDriven(RE::FormID a_id, float a_speed)
 	{
-		if (auto slot = Find(a_id)) {
+		auto slot = Find(a_id);
+		if (!slot && Active()) {
+			// Route legs can drive an actor outside the per-frame scan radius; without a slot the graph speed
+			// override (SpeedChannel) would not apply and the actor would glide in its idle pose.
+			slot = std::make_shared<Slot>();
+			slot->id = a_id;
+			slot->sampleFrame = g_frame.load();
+			std::lock_guard lk(g_tableMutex);
+			g_table.try_emplace(a_id, slot);
+			slot = g_table[a_id];
+		}
+		if (slot) {
 			std::lock_guard lk(slot->m);
 			slot->driven = a_speed;
 			slot->drivenFrame = g_frame.load();
@@ -871,7 +882,7 @@ namespace Locomotion
 			std::lock_guard lk(g_tableMutex);
 			for (auto it = g_table.begin(); it != g_table.end();) {
 				const auto& s = *it->second;
-				if (frame - s.sampleFrame > 180 && frame - s.climbFrame > 180 && !s.pr.busy.load()) {
+				if (frame - s.sampleFrame > 180 && frame - s.climbFrame > 180 && frame - s.drivenFrame > 180 && !s.pr.busy.load()) {
 					it = g_table.erase(it);
 				} else {
 					++it;

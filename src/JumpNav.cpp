@@ -425,6 +425,32 @@ namespace JumpNav
 			}
 		}
 
+		// Route legs move the actor by hand. The graph only plays its run/walk loop when it is in its
+		// movement state, which the engine enters on "moveStart" - sent by the AI when *it* starts moving.
+		// A follower routed because vanilla can't reach the player is standing still, so without this the
+		// graph stays idle and the actor glides. Re-sent every second (a no-op while already moving) in case
+		// the AI sends its own moveStop mid-route.
+		void RouteAnimMove(RE::Actor* a_actor, bool& a_on, double& a_next, double a_now, bool a_log, RE::FormID a_id)
+		{
+			if (a_on && a_now < a_next) {
+				return;
+			}
+			const bool accepted = a_actor->NotifyAnimationGraph(RE::BSFixedString("moveStart"));
+			if (!a_on && a_log) {
+				logger::info("ROUTEANIM {:08X} moveStart accepted={} aiMoving={}", a_id, accepted, a_actor->IsMoving());
+			}
+			a_on = true;
+			a_next = a_now + 1.0;
+		}
+
+		// End of a route: put the graph back to idle, unless the actor's own AI is moving (then the AI owns it).
+		void RouteAnimStop(RE::Actor* a_actor, bool a_on)
+		{
+			if (a_on && a_actor && !a_actor->IsMoving()) {
+				a_actor->NotifyAnimationGraph(RE::BSFixedString("moveStop"));
+			}
+		}
+
 		void Launch(RE::Actor* a_actor, const Caps& a_caps, const Plan& a_plan, Trigger a_trigger, float a_saving,
 			std::uintptr_t a_path = 0, int a_node = -1, float a_progress = 0)
 		{
@@ -710,6 +736,8 @@ namespace JumpNav
 			std::size_t     wpIdx = 0;
 			float           wpBest = 1e9f;
 			double          wpTime = 0;
+			bool            animOn = false;   // we sent moveStart for this route
+			double          animNext = 0;     // next moveStart refresh
 		};
 
 		std::vector<Search> g_searches;
@@ -1032,6 +1060,9 @@ namespace JumpNav
 
 		void EndGlide(const Glide& g, const char* a_reason, bool a_done)
 		{
+			if (auto p = g.handle.get(); p.get()) {
+				RouteAnimStop(p.get(), g.animOn);
+			}
 			if (a_done) {
 				Count([](Stats& st) { ++st.routesDone; });
 			}
@@ -1108,6 +1139,7 @@ namespace JumpNav
 					continue;
 				}
 				if (std::ranges::any_of(g_flights, [&](const Flight& f) { return f.id == g.id; }) || Mantle::Active(g.id)) {
+						g.animNext = 0;  // jump/climb clips leave the graph out of its movement state: restart the walk loop on the next leg
 						++it;
 						continue;
 					}
@@ -1187,6 +1219,9 @@ namespace JumpNav
 					const float rate = mv.rotStand + (mv.rotMove - mv.rotStand) * std::clamp(g.speed / (0.5f * mv.run), 0.0f, 1.0f);
 					const float hNew = TurnToward(actor, yaw, rate);
 					const float step = g.speed * a_dt;
+					if (g.speed > 20.0f) {
+						RouteAnimMove(actor, g.animOn, g.animNext, g_time, cfg.log, g.id);
+					}
 					Locomotion::NoteDriven(g.id, g.speed);
 					const Vec  fwd{ std::sin(hNew), std::cos(hNew), 0.0f };
 					Vec        np{ cur.x + fwd.x * step, cur.y + fwd.y * step, cur.z };
