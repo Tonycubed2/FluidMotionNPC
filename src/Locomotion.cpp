@@ -269,27 +269,11 @@ namespace Locomotion
 			SolveTwoBone(B.uarm[i], B.farm[i], B.hand[i], cur * (1.0f - w) + a_target * w, a_pole);
 		}
 
-		// One line per actor and stage (max 60 in total), always on: shows where a traversal pose gets lost.
-		std::thread::id g_mainThread;
-		void Diag(RE::FormID a_id, int a_stage, const std::string& a_msg)
-		{
-			static std::mutex                        m;
-			static std::unordered_set<std::uint64_t> seen;
-			static int                               count = 0;
-			std::lock_guard                          lk(m);
-			if (count >= 60 || !seen.insert((static_cast<std::uint64_t>(a_id) << 8) | static_cast<std::uint64_t>(a_stage)).second) {
-				return;
-			}
-			++count;
-			logger::info("POSEDIAG {:08X} {} [{}]", a_id, a_msg, std::this_thread::get_id() == g_mainThread ? "main thread" : "animation job");
-		}
-
 		void PostClimb(RE::Actor* a_actor, Slot& s)
 		{
 			RE::NiAVObject* root = a_actor->Get3D(false);
 			const auto*     clip = ClimbClip::Get(s.climbPose.clip, s.climbPose.rig);
 			if (!root || !clip || s.bonesBad) {
-				Diag(s.id, 1, std::format("no pose: root={} clip{}/{}={} bonesBad={}", root != nullptr, s.climbPose.clip, s.climbPose.rig, clip != nullptr, s.bonesBad));
 				return;
 			}
 			const auto frame = g_frame.load();
@@ -309,15 +293,7 @@ namespace Locomotion
 				}
 			}
 			if (nodes.size() != clip->bones.size()) {
-				Diag(s.id, 2, std::format("no pose: clip {} has {} bones, resolved {}", cp.clip, clip->bones.size(), nodes.size()));
 				return;
-			}
-			{
-				int missing = 0;
-				for (auto* n : nodes) {
-					missing += n ? 0 : 1;
-				}
-				Diag(s.id, 3 + cp.clip, std::format("pose applied: clip {} rig {} w={:.2f} bones {} (missing {})", cp.clip, cp.rig, cp.w, nodes.size(), missing));
 			}
 			for (std::size_t k = 0; k < nodes.size(); ++k) {
 				auto* n = nodes[k];
@@ -404,15 +380,9 @@ namespace Locomotion
 			}
 			s.lastPostT = now;
 			if (!(dt > 1e-4f && dt < 0.25f)) {
-				if (frame - s.climbFrame <= 2 && s.climbPose.w > 0.001f) {
-					Diag(s.id, 21, std::format("post skipped: step {:.4f}s", dt));
-				}
 				return;
 			}
 			if (!(frame - s.climbFrame <= 2 && s.climbPose.w > 0.001f)) {
-				if (s.climbFrame != 0 && frame - s.climbFrame <= 30 && s.climbPose.w > 0.001f) {
-					Diag(s.id, 20, std::format("post skipped: climb set {} frames ago", frame - s.climbFrame));
-				}
 				return;
 			}
 			static thread_local std::vector<RE::NiAVObject*> nodes;
@@ -623,9 +593,6 @@ namespace Locomotion
 				slot->pr.busy = false;
 			}
 			if (slot && Active() && !deferred) {
-				if (slot->climbFrame != 0 && g_frame.load() - slot->climbFrame <= 2) {
-					Diag(slot->id, 22, "animation job ran during a traversal");
-				}
 				Post(a, *slot, 0.0f);
 			}
 			if (a && !a->IsPlayerRef()) {
@@ -781,7 +748,6 @@ namespace Locomotion
 	void Install()
 	{
 		g_cfg = Config::Get().anim;
-		g_mainThread = std::this_thread::get_id();
 		REL::Relocation<std::uintptr_t> chr{ RE::VTABLE_Character[0] };
 		UpdateAnim::func = chr.write_vfunc(0x7D, UpdateAnim::thunk);
 		REL::Relocation<std::uintptr_t> spd{ RE::VTABLE_BSTAnimationGraphDataChannel_Actor_float_ActorSpeedChannel_[0] };
@@ -812,7 +778,6 @@ namespace Locomotion
 		if (slot) {
 			std::lock_guard lk(slot->m);
 			if (a_pose) {
-				Diag(a_id, 23 + a_pose->clip, std::format("traversal pose requested: clip {} rig {}", a_pose->clip, a_pose->rig));
 				slot->climbPose = *a_pose;
 				slot->climbFrame = g_frame.load();
 			} else {
