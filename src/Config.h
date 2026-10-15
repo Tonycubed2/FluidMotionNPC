@@ -8,6 +8,8 @@ namespace Config
 		bool  shortcut = true;
 		bool  pursuit = false;
 		bool  follow = true;
+		bool  followerJumps = true;
+		bool  combatJumps = true;
 		bool  route = true;
 		float routeMaxDist = 2500.0f;
 		float routeStuckSec = 1.0f;

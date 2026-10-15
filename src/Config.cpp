@@ -52,6 +52,8 @@ namespace Config
 		j.shortcut = ini.GetBoolValue("Jump", "bShortcut", j.shortcut);
 		j.pursuit = ini.GetBoolValue("Jump", "bPursuit", j.pursuit);
 		j.follow = ini.GetBoolValue("Jump", "bFollow", j.follow);
+		j.followerJumps = ini.GetBoolValue("Jump", "bFollowerJumps", j.followerJumps);
+		j.combatJumps = ini.GetBoolValue("Jump", "bCombatJumps", j.combatJumps);
 		j.route = ini.GetBoolValue("Jump", "bRoute", j.route);
 		getf("fRouteMaxDist", j.routeMaxDist);
 		getf("fRouteStuckSec", j.routeStuckSec);

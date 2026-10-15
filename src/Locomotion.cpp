@@ -152,7 +152,7 @@ namespace Locomotion
 			return found;
 		}
 
-		// One line per actor and stage (max 60 in total), always on: shows where a traversal pose gets lost.
+		// [Anim] bLog: one line per actor and stage (max 60 in total), shows where a traversal pose gets lost.
 		std::thread::id g_mainThread;
 		void Diag(RE::FormID a_id, int a_stage, const std::string& a_msg)
 		{
@@ -160,6 +160,9 @@ namespace Locomotion
 			static std::unordered_set<std::uint64_t> seen;
 			static int                               count = 0;
 			std::lock_guard                          lk(m);
+			if (!g_cfg.log) {
+				return;
+			}
 			if (count >= 60 || !seen.insert((static_cast<std::uint64_t>(a_id) << 8) | static_cast<std::uint64_t>(a_stage)).second) {
 				return;
 			}

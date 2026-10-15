@@ -24,6 +24,7 @@ namespace JumpNav
 		constexpr int   kPlansPerFrame = 2;
 		constexpr float kPostLandCheck = 0.4f;
 		constexpr float kSettleSec = 0.35f;
+		constexpr float kJumpWatchSec = 4.0f;
 		constexpr float kFollowStill = 0.5f;   // a follower that moved less than kStillDist for this long is stuck
 		constexpr float kStillDist = 40.0f;
 
@@ -201,8 +202,10 @@ namespace JumpNav
 		struct Settle
 		{
 			RE::FormID id;
-			double     until;
+			double     until;      // end of the no-bounce window
 			bool       npc;
+			double     watchUntil; // end of the stuck-jump-state watch
+			double     landNext;   // next allowed land-event resend
 		};
 		std::vector<Settle> g_settles;
 
@@ -713,7 +716,7 @@ namespace JumpNav
 				if (auto* cc = actor->GetCharController(); cc && cfg.driveMode == 0) {
 					cc->context.currentState = RE::hkpCharacterStateType::kOnGround;
 				}
-				g_settles.push_back({ f.id, g_time + kSettleSec, f.npc });
+				g_settles.push_back({ f.id, g_time + kSettleSec, f.npc, g_time + kJumpWatchSec, g_time + 0.5 });
 				bool anim = false;
 				SendEvent(actor, f.npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
 				if (cfg.log) {
@@ -738,12 +741,28 @@ namespace JumpNav
 			const auto& cfg = Config::Get().jump;
 			for (auto it = g_settles.begin(); it != g_settles.end();) {
 				auto* actor = RE::TESForm::LookupByID<RE::Actor>(it->id);
-				if (g_time > it->until || !actor || !actor->Is3DLoaded() || actor->IsDead() || Mantle::Active(it->id) ||
+				if (g_time > it->watchUntil || !actor || !actor->Is3DLoaded() || actor->IsDead() || Mantle::Active(it->id) ||
 					std::ranges::any_of(g_flights, [&](const Flight& f) { return f.id == it->id; })) {
 					it = g_settles.erase(it);
 					continue;
 				}
-				if (auto* cc = actor->GetCharController(); cc && cfg.driveMode == 0) {
+				// Sometimes the behaviour graph ignores the land event and stays in its jump state. It then ignores
+				// the walk events too and the NPC skates along on its run speed. Re-send the land event while it is
+				// standing on the ground, at most twice a second (every frame restarted the landing = micro-bounces).
+				auto* cc = actor->GetCharController();
+				if (g_time >= it->landNext && actor->IsInJumpState() && cc && cc->context.currentState == RE::hkpCharacterStateType::kOnGround) {
+					it->landNext = g_time + 0.5;
+					bool anim = false;
+					SendEvent(actor, it->npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
+					if (cfg.log) {
+						logger::info("[{}] RELAND {:08X} graph still in jump state after landing (accepted={})", Tuning::ModeLabel(), it->id, anim);
+					}
+				}
+				if (g_time > it->until) {
+					++it;
+					continue;
+				}
+				if (cc && cfg.driveMode == 0) {
 					Vec v;
 					actor->GetLinearVelocity(v);
 					if (v.z > 0.0f) {
@@ -1719,6 +1738,10 @@ namespace JumpNav
 			if (!CanJump(a_actor, caps)) {
 				return;
 			}
+			// INI: followers / NPCs in combat may be limited to walking, routing and climbing (no jumps).
+			if (a_actor->IsInCombat() ? !cfg.combatJumps : (a_actor->IsPlayerTeammate() && !cfg.followerJumps)) {
+				caps.jumps = false;
+			}
 			if (auto* g = FindGlide(a_actor->GetFormID())) {
 				TryReplan(a_actor, caps, *g, m);
 				return;
@@ -1750,9 +1773,8 @@ namespace JumpNav
 			}
 			const float stillFor = static_cast<float>(g_time - m.stillT);
 
-			if (!caps.jumps) {
-			} else if (a_actor->IsInCombat()) {
-				if (cfg.pursuit && perceived && !IsRanged(a_actor) && !navOk) {
+			if (a_actor->IsInCombat()) {
+				if (caps.jumps && cfg.pursuit && perceived && !IsRanged(a_actor) && !navOk) {
 					if (TryReach(a_actor, caps, combatTgt.get(), Trigger::kPursuit, cfg.pursuitStuckSec, cfg.pursuitMinRise, 15.0f, m, a_plans)) {
 						return;
 					}
@@ -1778,7 +1800,7 @@ namespace JumpNav
 					}
 				}
 				// Catch-up jump only when stuck and the navmesh can't get it to the player.
-				if (stillFor >= kFollowStill && !NavReaches(a_actor, player->GetPosition()) &&
+				if (caps.jumps && stillFor >= kFollowStill && !NavReaches(a_actor, player->GetPosition()) &&
 					TryReach(a_actor, caps, player, Trigger::kFollow, cfg.followStuckSec, 100.0f, 60.0f, m, a_plans)) {
 					return;
 				}
