@@ -854,6 +854,17 @@ namespace Locomotion
 		}
 	}
 
+	float CommandedSpeed(RE::FormID a_id)
+	{
+		if (auto slot = Find(a_id)) {
+			std::lock_guard lk(slot->m);
+			if (g_time.load() - slot->cmdT < 0.3f) {
+				return slot->cmdSpeed;
+			}
+		}
+		return -1.0f;
+	}
+
 	bool IsDriven(RE::FormID a_id)
 	{
 		if (auto slot = Find(a_id)) {

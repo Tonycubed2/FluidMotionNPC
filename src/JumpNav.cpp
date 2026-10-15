@@ -496,10 +496,28 @@ namespace JumpNav
 		// the AI (combat in particular) drops the graph out of its movement state mid-route.
 		// The actor's own AI is trying to move (it wants to walk/run but may be blocked). False while it stands still
 		// on purpose: roaring, posturing, casting, waiting, idling, or playing an animation that moves it itself.
+		// Signal: the walk/run speed the AI asks the animation for (speed channel), so a blocked NPC still pushing
+		// forward counts as moving and a roaring one doesn't. NPCs outside the sampled set (far away) are assumed
+		// to be moving, as before v9. (v9 used the character controller's speedPct, which isn't reliable for
+		// NPCs and blocked legitimate shortcut jumps.)
 		bool WantsToMove(RE::Actor* a_actor)
 		{
-			auto* cc = a_actor->GetCharController();
-			return cc && cc->speedPct > 0.25f && !a_actor->IsAnimationDriven();
+			if (a_actor->IsAnimationDriven()) {
+				return false;
+			}
+			const float cmd = Locomotion::CommandedSpeed(a_actor->GetFormID());
+			return cmd < 0.0f || cmd > 30.0f;
+		}
+
+		// Target clearly above or below a nearby actor: the case where the game's AI gives up and a route is the answer.
+		bool LevelGap(RE::Actor* a_actor, RE::TESObjectREFR* a_target, float a_height)
+		{
+			if (!a_target) {
+				return false;
+			}
+			const auto& cfg = Config::Get().jump;
+			const Vec   d = a_target->GetPosition() - a_actor->GetPosition();
+			return Len2D(d) < 400.0f && (d.z < -cfg.vertMismatch * a_height || d.z > cfg.meleeRise * a_height);
 		}
 
 		void RouteAnimMove(RE::Actor* a_actor, bool& a_on, double& a_next, double a_now, bool a_log, RE::FormID a_id)
@@ -1257,9 +1275,12 @@ namespace JumpNav
 					drop = "parkour";  // SkyParkour / Follower Parkour started a move on it
 				} else if (actor->IsAnimationDriven() || actor->IsAttacking()) {
 					drop = "busy";     // roar, power attack, scripted move: its own animation moves it, never slide it
-				} else if (g.holdUntil <= 0 && !std::ranges::any_of(g_flights, [&](const Flight& f) { return f.id == g.id; }) && !Mantle::Active(g.id) &&
+				} else if (actor->IsInCombat() && g.holdUntil <= 0 && !std::ranges::any_of(g_flights, [&](const Flight& f) { return f.id == g.id; }) &&
+						   !Mantle::Active(g.id) && !LevelGap(actor, RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId), g.caps.height) &&
 						   (g.idleT = WantsToMove(actor) ? 0.0f : g.idleT + a_dt) > 0.4f) {
-					drop = "aistop";   // its AI stopped trying to move (decided to stand, roar, cast...)
+					// In combat on the same level, its AI stopped trying to move (roar, cast, decided to hold). Followers
+					// and level-gap chases are exempt: there the game's AI often gives up while the route is still valid.
+					drop = "aistop";
 				} else if (g_time > g.until) {
 					drop = "timeout";
 				} else if (actor->IsInCombat() && g_time >= g.seeNext &&
@@ -1800,11 +1821,8 @@ namespace JumpNav
 			// or idling on purpose. (Routing it anyway made it slide toward its target mid-roar.)
 			// Exception: a melee fighter clearly below/above a target it can see often gives up moving because the game
 			// knows it can't get there. That is the case routes exist for (but never mid-roar or mid-attack).
-			bool levelGap = false;
-			if (a_actor->IsInCombat() && perceived && !IsRanged(a_actor) && !a_actor->IsAnimationDriven()) {
-				const Vec   d = combatTgt->GetPosition() - a_actor->GetPosition();
-				levelGap = Len2D(d) < 400.0f && (d.z < -cfg.vertMismatch * caps.height || d.z > cfg.meleeRise * caps.height);
-			}
+			const bool levelGap = a_actor->IsInCombat() && perceived && !IsRanged(a_actor) && !a_actor->IsAnimationDriven() &&
+			                      LevelGap(a_actor, combatTgt.get(), caps.height);
 			if (!WantsToMove(a_actor) && !levelGap) {
 				m.stillT = g_time;
 				m.rBestTime = g_time;
