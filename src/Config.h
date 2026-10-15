@@ -79,7 +79,7 @@ namespace Config
 		int   maxActors = 24;
 		bool  climb = true;
 		float climbMin = 38.0f;
-		float climbMaxFrac = 0.8f;
+		float climbMaxFrac = 1.0f;
 		float climbApproach = 0.1f;
 		float climbTail = 0.35f;
 		float climbRate = 1.2f;

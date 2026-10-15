@@ -1242,6 +1242,8 @@ namespace JumpNav
 					drop = "lost";
 				} else if (Api::Claimed(g.id)) {
 					drop = "claimed";  // another plugin (e.g. FluidMotionSpiders) took over this actor
+				} else if (Api::ExternalBusy(actor)) {
+					drop = "parkour";  // SkyParkour / Follower Parkour started a move on it
 				} else if (g_time > g.until) {
 					drop = "timeout";
 				} else if (actor->IsInCombat() && g_time >= g.seeNext &&
@@ -1726,7 +1728,7 @@ namespace JumpNav
 		void Evaluate(RE::Actor* a_actor, int& a_plans)
 		{
 			const auto& cfg = Config::Get().jump;
-			if (Api::Claimed(a_actor->GetFormID())) {
+			if (Api::Claimed(a_actor->GetFormID()) || Api::ExternalBusy(a_actor)) {
 				return;
 			}
 			auto&       m = g_memo[a_actor->GetFormID()];

@@ -55,6 +55,19 @@ namespace Api
 		return it != g_actors.end() && Clock::now() < it->second.turnUntil ? it->second.turnDeg : 0.0f;
 	}
 
+	bool ExternalBusy(RE::Actor* a_actor)
+	{
+		if (!a_actor || !a_actor->Is3DLoaded()) {
+			return false;
+		}
+		// Set by SkyParkour's behaviour graph while a parkour move / landing roll / slide plays (Follower Parkour uses
+		// the same graph on NPCs). Absent variables read as false, so this costs nothing without those mods.
+		bool parkour = false, slide = false;
+		a_actor->GetGraphVariableBool("SkyParkourOngoing", parkour);
+		a_actor->GetGraphVariableBool("SkyParkourSliding", slide);
+		return parkour || slide;
+	}
+
 	void RunPostGraph(RE::Actor* a_actor, int a_src)
 	{
 		if (!a_actor) {
