@@ -24,7 +24,8 @@ namespace JumpNav
 		constexpr int   kPlansPerFrame = 2;
 		constexpr float kPostLandCheck = 0.4f;
 		constexpr float kSettleSec = 0.35f;
-		constexpr float kJumpWatchSec = 4.0f;
+		constexpr float kJumpWatchSec = 2.5f;
+		constexpr float kRelandAfter = 1.0f;
 		constexpr float kFollowStill = 0.5f;   // a follower that moved less than kStillDist for this long is stuck
 		constexpr float kStillDist = 40.0f;
 
@@ -716,7 +717,7 @@ namespace JumpNav
 				if (auto* cc = actor->GetCharController(); cc && cfg.driveMode == 0) {
 					cc->context.currentState = RE::hkpCharacterStateType::kOnGround;
 				}
-				g_settles.push_back({ f.id, g_time + kSettleSec, f.npc, g_time + kJumpWatchSec, g_time + 0.5 });
+				g_settles.push_back({ f.id, g_time + kSettleSec, f.npc, g_time + kJumpWatchSec, g_time + kRelandAfter });
 				bool anim = false;
 				SendEvent(actor, f.npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
 				if (cfg.log) {
@@ -747,11 +748,15 @@ namespace JumpNav
 					continue;
 				}
 				// Sometimes the behaviour graph ignores the land event and stays in its jump state. It then ignores
-				// the walk events too and the NPC skates along on its run speed. Re-send the land event while it is
-				// standing on the ground, at most twice a second (every frame restarted the landing = micro-bounces).
+				// the walk events too and the NPC skates along on its run speed. ONE retry, only when a second after
+				// touchdown it is still in the jump state and sliding along the ground. A normal landing animation
+				// also counts as "jump state", so repeated re-sends restarted it (head-bob "pecking").
 				auto* cc = actor->GetCharController();
-				if (g_time >= it->landNext && actor->IsInJumpState() && cc && cc->context.currentState == RE::hkpCharacterStateType::kOnGround) {
-					it->landNext = g_time + 0.5;
+				Vec   hv;
+				actor->GetLinearVelocity(hv);
+				if (it->landNext > 0 && g_time >= it->landNext && actor->IsInJumpState() && cc && cc->context.currentState == RE::hkpCharacterStateType::kOnGround &&
+					Len2D(hv) > 60.0f) {
+					it->landNext = 0;  // never again for this landing
 					bool anim = false;
 					SendEvent(actor, it->npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
 					if (cfg.log) {
