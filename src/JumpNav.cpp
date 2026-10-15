@@ -494,6 +494,14 @@ namespace JumpNav
 		// A follower routed because vanilla can't reach the player is standing still, so without this the
 		// graph stays idle and the actor glides. Re-sent every 0.3 s (a no-op while already moving) in case
 		// the AI (combat in particular) drops the graph out of its movement state mid-route.
+		// The actor's own AI is trying to move (it wants to walk/run but may be blocked). False while it stands still
+		// on purpose: roaring, posturing, casting, waiting, idling, or playing an animation that moves it itself.
+		bool WantsToMove(RE::Actor* a_actor)
+		{
+			auto* cc = a_actor->GetCharController();
+			return cc && cc->speedPct > 0.25f && !a_actor->IsAnimationDriven();
+		}
+
 		void RouteAnimMove(RE::Actor* a_actor, bool& a_on, double& a_next, double a_now, bool a_log, RE::FormID a_id)
 		{
 			if (a_on && a_now < a_next) {
@@ -868,6 +876,7 @@ namespace JumpNav
 			bool            animOn = false;   // we sent moveStart for this route
 			double          animNext = 0;     // next moveStart refresh
 			double          seeNext = 0;      // next perception check (combat routes)
+			float           idleT = 0;        // how long the actor's AI has not wanted to move
 		};
 
 		std::vector<Search> g_searches;
@@ -1202,7 +1211,9 @@ namespace JumpNav
 			m.rBest = (std::numeric_limits<float>::max)();
 			m.routeNext = (std::max<double>)(m.routeNext, g_time + (a_done ? 0.5 : 2.0));
 			auto* gl = RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId);
-			if (auto ptr = g.handle.get(); ptr.get() && gl && !std::string_view(a_reason).starts_with("calm") &&
+			const std::string_view why(a_reason);
+			const bool             voluntary = why.starts_with("calm") || why == "aistop" || why == "busy" || why == "parkour" || why == "claimed";
+			if (auto ptr = g.handle.get(); ptr.get() && gl && !voluntary &&
 				(Len2D(gl->GetPosition() - ptr->GetPosition()) > g.gap + 60.0f || gl->GetPosition().z - ptr->GetPosition().z > Config::Get().jump.meleeRise * g.caps.height)) {
 				m.forceStuck = true;
 				m.routeNext = g_time + (a_done ? 0.05 : 0.6);
@@ -1244,6 +1255,11 @@ namespace JumpNav
 					drop = "claimed";  // another plugin (e.g. FluidMotionSpiders) took over this actor
 				} else if (Api::ExternalBusy(actor)) {
 					drop = "parkour";  // SkyParkour / Follower Parkour started a move on it
+				} else if (actor->IsAnimationDriven() || actor->IsAttacking()) {
+					drop = "busy";     // roar, power attack, scripted move: its own animation moves it, never slide it
+				} else if (g.holdUntil <= 0 && !std::ranges::any_of(g_flights, [&](const Flight& f) { return f.id == g.id; }) && !Mantle::Active(g.id) &&
+						   (g.idleT = WantsToMove(actor) ? 0.0f : g.idleT + a_dt) > 0.4f) {
+					drop = "aistop";   // its AI stopped trying to move (decided to stand, roar, cast...)
 				} else if (g_time > g.until) {
 					drop = "timeout";
 				} else if (actor->IsInCombat() && g_time >= g.seeNext &&
@@ -1487,7 +1503,8 @@ namespace JumpNav
 			}
 			Vec rv;
 			a_actor->GetLinearVelocity(rv);
-			if (!follower && Len2D(rv) > 100.0f) {
+			// Standing still on purpose (roaring, posturing, casting) is not being stuck.
+			if ((!follower && Len2D(rv) > 100.0f) || !WantsToMove(a_actor)) {
 				a_memo.rBestTime = g_time;
 			}
 			const bool stuck = a_memo.forceStuck || mismatch || g_time - a_memo.rBestTime >= (follower ? cfg.followStuckSec : cfg.routeStuckSec);
@@ -1779,6 +1796,21 @@ namespace JumpNav
 				}
 			}
 			const float stillFor = static_cast<float>(g_time - m.stillT);
+			// Nothing starts on an actor whose own AI isn't trying to move: it is roaring, posturing, casting, waiting
+			// or idling on purpose. (Routing it anyway made it slide toward its target mid-roar.)
+			// Exception: a melee fighter clearly below/above a target it can see often gives up moving because the game
+			// knows it can't get there. That is the case routes exist for (but never mid-roar or mid-attack).
+			bool levelGap = false;
+			if (a_actor->IsInCombat() && perceived && !IsRanged(a_actor) && !a_actor->IsAnimationDriven()) {
+				const Vec   d = combatTgt->GetPosition() - a_actor->GetPosition();
+				levelGap = Len2D(d) < 400.0f && (d.z < -cfg.vertMismatch * caps.height || d.z > cfg.meleeRise * caps.height);
+			}
+			if (!WantsToMove(a_actor) && !levelGap) {
+				m.stillT = g_time;
+				m.rBestTime = g_time;
+				m.bestTime = g_time;
+				return;
+			}
 
 			if (a_actor->IsInCombat()) {
 				if (caps.jumps && cfg.pursuit && perceived && !IsRanged(a_actor) && !navOk) {
