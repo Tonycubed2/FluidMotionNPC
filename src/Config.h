@@ -45,6 +45,10 @@ namespace Config
 		float followStuckSec = 1.0f;
 		float followMinSaving = 200.0f;
 		float followMinRatio = 1.4f;
+		bool  followVault = true;
+		float followVaultMinSaving = 120.0f;
+		float followVaultMinRatio = 1.8f;
+		float followVaultMaxDz = 30.0f;
 		float pursuitMinRise = 70.0f;
 		float pursuitMinDrop = 120.0f;
 		float meleeRise = 0.75f;

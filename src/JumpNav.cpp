@@ -1629,7 +1629,7 @@ namespace JumpNav
 			StartSearch(a_actor, a_caps, goal, a_g.gap - a_caps.radius - 40.0f, true, 0.0f);
 		}
 
-		bool TryShortcut(RE::Actor* a_actor, const Caps& a_caps, int& a_plans, float a_minSaving, float a_minRatio)
+		bool TryShortcut(RE::Actor* a_actor, const Caps& a_caps, int& a_plans, float a_minSaving, float a_minRatio, float a_maxAbsDz = 1e9f)
 		{
 			const auto& cfg = Config::Get().jump;
 			auto        pr = PathProbe::GetPathRef(a_actor);
@@ -1661,7 +1661,7 @@ namespace JumpNav
 			for (int j = last; j > i0 && a_plans > 0; --j) {
 				const Vec   d = geo.nodes[j].pos - pos;
 				const float dh = Len2D(d);
-				if (dh > a_caps.dist || dh < 40.0f || d.z > a_caps.up || -d.z > a_caps.down) {
+				if (dh > a_caps.dist || dh < 40.0f || d.z > a_caps.up || -d.z > a_caps.down || std::fabs(d.z) > a_maxAbsDz) {
 					continue;
 				}
 				const float d3 = d.Length();
@@ -1869,6 +1869,12 @@ namespace JumpNav
 				const float minSaving = following ? cfg.followMinSaving : cfg.minSaving;
 				const float minRatio = following ? cfg.followMinRatio : cfg.minRatio;
 				if (caps.jumps && !followerClose && (!a_actor->IsInCombat() || perceived) && TryShortcut(a_actor, caps, a_plans, minSaving, minRatio)) {
+					return;
+				}
+				// A follower close behind the player may still vault a level obstacle (table, fence, low wall) when walking
+				// around is a real detour. Landing within ~knee height of the take-off keeps it off stairs and slopes.
+				if (caps.jumps && followerClose && cfg.followVault &&
+					TryShortcut(a_actor, caps, a_plans, cfg.followVaultMinSaving, cfg.followVaultMinRatio, cfg.followVaultMaxDz)) {
 					return;
 				}
 				if (cfg.route) {

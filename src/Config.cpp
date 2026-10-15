@@ -92,6 +92,10 @@ namespace Config
 		getf("fFollowStuckSec", j.followStuckSec);
 		getf("fFollowMinSaving", j.followMinSaving);
 		getf("fFollowMinRatio", j.followMinRatio);
+		j.followVault = ini.GetBoolValue("Jump", "bFollowVault", j.followVault);
+		getf("fFollowVaultMinSaving", j.followVaultMinSaving);
+		getf("fFollowVaultMinRatio", j.followVaultMinRatio);
+		getf("fFollowVaultMaxDz", j.followVaultMaxDz);
 		getf("fPursuitMinRise", j.pursuitMinRise);
 		getf("fPursuitMinDrop", j.pursuitMinDrop);
 		getf("fMeleeRise", j.meleeRise);
