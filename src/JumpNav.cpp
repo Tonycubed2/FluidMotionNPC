@@ -192,6 +192,7 @@ namespace JumpNav
 				double     rBestTime = 0;
 				double     routeNext = 0;
 			double     nextPfLog = 0;
+			double     nextWhyLog = 0;
 			bool       forceStuck = false;
 			// Where the actor was when it last moved a real distance. A follower pressed against a rock keeps
 			// its run animation and jitters (velocity looks "moving"), but its position barely changes.
@@ -500,11 +501,10 @@ namespace JumpNav
 		// forward counts as moving and a roaring one doesn't. NPCs outside the sampled set (far away) are assumed
 		// to be moving, as before v9. (v9 used the character controller's speedPct, which isn't reliable for
 		// NPCs and blocked legitimate shortcut jumps.)
+		// (The game's "animation driven" flag is NOT used: it is also set during ordinary NPC locomotion, and using it
+		// in v9/v10 blocked almost every follower jump and vault.)
 		bool WantsToMove(RE::Actor* a_actor)
 		{
-			if (a_actor->IsAnimationDriven()) {
-				return false;
-			}
 			const float cmd = Locomotion::CommandedSpeed(a_actor->GetFormID());
 			return cmd < 0.0f || cmd > 30.0f;
 		}
@@ -1273,8 +1273,8 @@ namespace JumpNav
 					drop = "claimed";  // another plugin (e.g. FluidMotionSpiders) took over this actor
 				} else if (Api::ExternalBusy(actor)) {
 					drop = "parkour";  // SkyParkour / Follower Parkour started a move on it
-				} else if (actor->IsAnimationDriven() || actor->IsAttacking()) {
-					drop = "busy";     // roar, power attack, scripted move: its own animation moves it, never slide it
+				} else if (actor->IsAttacking()) {
+					drop = "busy";     // attacking: its own animation moves it, never slide it
 				} else if (actor->IsInCombat() && g.holdUntil <= 0 && !std::ranges::any_of(g_flights, [&](const Flight& f) { return f.id == g.id; }) &&
 						   !Mantle::Active(g.id) && !LevelGap(actor, RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId), g.caps.height) &&
 						   (g.idleT = WantsToMove(actor) ? 0.0f : g.idleT + a_dt) > 0.4f) {
@@ -1633,11 +1633,21 @@ namespace JumpNav
 		{
 			const auto& cfg = Config::Get().jump;
 			auto        pr = PathProbe::GetPathRef(a_actor);
+			static std::unordered_map<RE::FormID, double> s_whyNext;
+			auto why = [&](const std::string& a_msg) {
+				if (cfg.log && a_maxAbsDz < 1e8f && g_time >= s_whyNext[a_actor->GetFormID()]) {
+					s_whyNext[a_actor->GetFormID()] = g_time + 2.0;
+					auto* n = a_actor->GetName();
+					logger::info("[{}] VAULTCHECK {:08X} '{}' {}", Tuning::ModeLabel(), a_actor->GetFormID(), n ? n : "", a_msg);
+				}
+			};
 			if (!pr || !pr->path || (pr->state != 4 && pr->state != 0xd)) {
+				why(std::format("no usable path (ref={} state={})", pr.has_value(), pr ? static_cast<int>(pr->state) : -1));
 				return false;
 			}
 			static PathProbe::PathGeometry geo;
 			if (!PathProbe::ReadPath(pr->path, geo) || geo.count < 2) {
+				why("path unreadable or too short");
 				return false;
 			}
 			const int i0 = static_cast<int>(pr->progress);
@@ -1658,6 +1668,8 @@ namespace JumpNav
 				last = j;
 			}
 
+			float bestSave = -1e9f, bestRatio = 0, bestDz = 0;
+			int   inRange = 0;
 			for (int j = last; j > i0 && a_plans > 0; --j) {
 				const Vec   d = geo.nodes[j].pos - pos;
 				const float dh = Len2D(d);
@@ -1666,6 +1678,12 @@ namespace JumpNav
 				}
 				const float d3 = d.Length();
 				const float saving = arc[j] - d3;
+				++inRange;
+				if (saving > bestSave) {
+					bestSave = saving;
+					bestRatio = d3 > 1.0f ? arc[j] / d3 : 0.0f;
+					bestDz = d.z;
+				}
 				if (saving < a_minSaving || arc[j] < a_minRatio * d3) {
 					continue;
 				}
@@ -1678,7 +1696,11 @@ namespace JumpNav
 				}
 				CountReject(r);
 				RecordDebug({ pos, geo.nodes[j].pos }, false, std::format("shortcut: {}", RejectName(r)));
+				why(std::format("jump planned but rejected: {}", RejectName(r)));
 			}
+			why(inRange ? std::format("path nodes={} in range={} best saving={:.0f} (need {:.0f}) ratio={:.2f} (need {:.2f}) dz={:+.0f}", geo.count - i0 - 1,
+							  inRange, bestSave, a_minSaving, bestRatio, a_minRatio, bestDz) :
+			              std::format("path nodes={}: none within jump range / level limit", geo.count - i0 - 1));
 			return false;
 		}
 
@@ -1821,8 +1843,15 @@ namespace JumpNav
 			// or idling on purpose. (Routing it anyway made it slide toward its target mid-roar.)
 			// Exception: a melee fighter clearly below/above a target it can see often gives up moving because the game
 			// knows it can't get there. That is the case routes exist for (but never mid-roar or mid-attack).
-			const bool levelGap = a_actor->IsInCombat() && perceived && !IsRanged(a_actor) && !a_actor->IsAnimationDriven() &&
+			const bool levelGap = a_actor->IsInCombat() && perceived && !IsRanged(a_actor) && !a_actor->IsAttacking() &&
 			                      LevelGap(a_actor, combatTgt.get(), caps.height);
+			if (cfg.log && following && g_time >= m.nextWhyLog) {
+				m.nextWhyLog = g_time + 2.0;
+				auto* n = a_actor->GetName();
+				logger::info("[{}] FOLLOWEVAL {:08X} '{}' dist={:.0f} close={} cmdSpeed={:.0f} wantsMove={} still={:.1f}s jumps={}", Tuning::ModeLabel(),
+					a_actor->GetFormID(), n ? n : "", playerDist, followerClose, Locomotion::CommandedSpeed(a_actor->GetFormID()), WantsToMove(a_actor), stillFor,
+					caps.jumps);
+			}
 			if (!WantsToMove(a_actor) && !levelGap) {
 				m.stillT = g_time;
 				m.rBestTime = g_time;
