@@ -1115,7 +1115,21 @@ namespace JumpNav
 					Vec         q;
 					Mantle::Plan pl;
 					if (s.caps.npc && Mantle::PlanClimb(r, cur.p, { dx, dy, 0.0f }, s.caps.height, 70.0f, false, pl)) {
-						Push(s, i, pl.stand, 1.2f * cur.p.GetDistance(pl.stand) + 40.0f, false, true, false, dx, dy);
+						// A low obstacle (table, bench, fence) with free floor at the same level behind it: vault over it
+						// instead of climbing onto it.
+						bool vaulted = false;
+						if (s.caps.jumps && cfg.vault && pl.H <= cfg.vaultMaxFrac * s.caps.height) {
+							for (float d : { 180.0f, 230.0f, 140.0f }) {
+								if (JumpEdge(s, r, cur.p, dx, dy, d, q) && std::fabs(q.z - cur.p.z) <= cfg.vaultMaxDz) {
+									Push(s, i, q, cur.p.GetDistance(q) + 20.0f, true);
+									vaulted = true;
+									break;
+								}
+							}
+						}
+						if (!vaulted) {
+							Push(s, i, pl.stand, 1.2f * cur.p.GetDistance(pl.stand) + 40.0f, false, true, false, dx, dy);
+						}
 						continue;
 					}
 					if (s.caps.npc && s.caps.jumps && s.caps.up > 60.0f && Mantle::PlanClimb(r, cur.p, { dx, dy, 0.0f }, s.caps.height, 70.0f, true, pl, (std::min)(s.caps.up, 85.0f))) {
