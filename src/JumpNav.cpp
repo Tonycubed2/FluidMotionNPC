@@ -731,7 +731,8 @@ namespace JumpNav
 			}
 		}
 
-		// For a moment after landing: no upward velocity (no bounce / second hop) and the jump state is closed.
+		// For a moment after landing: no upward velocity (no bounce / second hop). The land event is sent once at
+		// touchdown only; re-sending it restarted the landing animation every frame (v7 micro-bounces).
 		void UpdateSettles()
 		{
 			const auto& cfg = Config::Get().jump;
@@ -751,10 +752,6 @@ namespace JumpNav
 					}
 					cc->fallStartHeight = actor->GetPosition().z;
 					cc->fallTime = 0.0f;
-				}
-				if (actor->IsInJumpState()) {
-					bool anim = false;
-					SendEvent(actor, it->npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
 				}
 				++it;
 			}

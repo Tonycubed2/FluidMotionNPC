@@ -152,6 +152,44 @@ namespace Locomotion
 			return found;
 		}
 
+		// One line per actor and stage (max 60 in total), always on: shows where a traversal pose gets lost.
+		std::thread::id g_mainThread;
+		void Diag(RE::FormID a_id, int a_stage, const std::string& a_msg)
+		{
+			static std::mutex                        m;
+			static std::unordered_set<std::uint64_t> seen;
+			static int                               count = 0;
+			std::lock_guard                          lk(m);
+			if (count >= 60 || !seen.insert((static_cast<std::uint64_t>(a_id) << 8) | static_cast<std::uint64_t>(a_stage)).second) {
+				return;
+			}
+			++count;
+			logger::info("POSEDIAG {:08X} {} [{}]", a_id, a_msg, std::this_thread::get_id() == g_mainThread ? "main thread" : "animation job");
+		}
+
+		// a_anc is a_n's parent or a few levels above it (modded skeletons insert helper nodes between bones).
+		bool Under(const RE::NiAVObject* a_n, const RE::NiAVObject* a_anc, int a_depth = 4)
+		{
+			const RE::NiAVObject* p = a_n ? a_n->parent : nullptr;
+			for (int d = 0; p && d < a_depth; ++d, p = p->parent) {
+				if (p == a_anc) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		std::string Describe(const RE::NiAVObject* a_n)
+		{
+			if (!a_n) {
+				return "MISSING";
+			}
+			const auto* rtti = a_n->GetRTTI();
+			std::string out = std::format("'{}' ({})", a_n->name.c_str(), rtti && rtti->name ? rtti->name : "?");
+			out += a_n->parent ? std::format(" parent '{}'", a_n->parent->name.c_str()) : " no parent";
+			return out;
+		}
+
 		void ResolveBones(Slot& s, RE::NiAVObject* a_root)
 		{
 			s.root.reset(a_root);
@@ -178,11 +216,18 @@ namespace Locomotion
 				arms = arms && b.uarm[i] && b.farm[i] && b.hand[i];
 			}
 			b.arms = arms;
+			const bool found = ok;
 			if (ok) {
-				ok = b.spine[0]->parent && b.spine[1]->parent == b.spine[0] && b.spine[2]->parent == b.spine[1] && b.com->parent;
+				ok = b.spine[0]->parent && Under(b.spine[1], b.spine[0]) && Under(b.spine[2], b.spine[1]) && b.com->parent;
 				for (int i = 0; i < 2 && ok; ++i) {
-					ok = b.calf[i]->parent == b.thigh[i] && b.foot[i]->parent == b.calf[i];
+					ok = Under(b.calf[i], b.thigh[i]) && Under(b.foot[i], b.calf[i]);
 				}
+			}
+			if (!ok) {
+				Diag(s.id, 40, std::format("skeleton rejected ({}): root {} | com {} | spine {} / {} / {} | head {}", found ? "chain" : "bone missing", Describe(a_root),
+								   Describe(b.com), Describe(b.spine[0]), Describe(b.spine[1]), Describe(b.spine[2]), Describe(b.head)));
+				Diag(s.id, 41, std::format("legs: L {} / {} / {} | R {} / {} / {}", Describe(b.thigh[0]), Describe(b.calf[0]), Describe(b.foot[0]), Describe(b.thigh[1]),
+								   Describe(b.calf[1]), Describe(b.foot[1])));
 			}
 			if (b.arms) {
 				for (int i = 0; i < 2; ++i) {
@@ -267,21 +312,6 @@ namespace Locomotion
 			}
 			const V3 cur = B.hand[i]->world.translate;
 			SolveTwoBone(B.uarm[i], B.farm[i], B.hand[i], cur * (1.0f - w) + a_target * w, a_pole);
-		}
-
-		// One line per actor and stage (max 60 in total), always on: shows where a traversal pose gets lost.
-		std::thread::id g_mainThread;
-		void Diag(RE::FormID a_id, int a_stage, const std::string& a_msg)
-		{
-			static std::mutex                        m;
-			static std::unordered_set<std::uint64_t> seen;
-			static int                               count = 0;
-			std::lock_guard                          lk(m);
-			if (count >= 60 || !seen.insert((static_cast<std::uint64_t>(a_id) << 8) | static_cast<std::uint64_t>(a_stage)).second) {
-				return;
-			}
-			++count;
-			logger::info("POSEDIAG {:08X} {} [{}]", a_id, a_msg, std::this_thread::get_id() == g_mainThread ? "main thread" : "animation job");
 		}
 
 		void PostClimb(RE::Actor* a_actor, Slot& s)
