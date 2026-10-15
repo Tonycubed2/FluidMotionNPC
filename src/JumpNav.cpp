@@ -193,6 +193,7 @@ namespace JumpNav
 				double     routeNext = 0;
 			double     nextPfLog = 0;
 			double     nextWhyLog = 0;
+			double     vaultNext = 0;
 			bool       forceStuck = false;
 			// Where the actor was when it last moved a real distance. A follower pressed against a rock keeps
 			// its run animation and jitters (velocity looks "moving"), but its position barely changes.
@@ -1799,6 +1800,66 @@ namespace JumpNav
 			return false;
 		}
 
+		// A follower heading for a target at the same level with a low obstacle (table, bench, fence) in the straight
+		// line between them vaults over it toward the target, whatever route the game's pathfinding picked.
+		bool TryVaultToward(RE::Actor* a_actor, const Caps& a_caps, RE::Actor* a_target, Memo& a_memo, int& a_plans)
+		{
+			const auto& cfg = Config::Get().jump;
+			if (!a_target || g_time < a_memo.vaultNext || a_plans <= 0) {
+				return false;
+			}
+			a_memo.vaultNext = g_time + 0.5;
+			const Vec   pos = a_actor->GetPosition();
+			const Vec   d = a_target->GetPosition() - pos;
+			const float dh = Len2D(d);
+			if (dh < 150.0f || dh > 700.0f || std::fabs(d.z) > cfg.vaultMaxDz) {
+				return false;
+			}
+			const Vec dir{ d.x / dh, d.y / dh, 0.0f };
+			Caster    r;
+			if (!r.Init(a_actor)) {
+				return false;
+			}
+			const float h = a_caps.height;
+			const float probe = (std::min)(dh - 60.0f, 160.0f);
+			const Vec   knee = pos + Vec{ 0, 0, h * 0.3f };
+			Hit         lo;
+			if (!r.Cast(knee, knee + dir * probe, lo) || IsActorRef(lo.ref)) {
+				return false;  // nothing in the way at knee height
+			}
+			const float wall = Len2D(lo.point - pos);
+			const Vec   over = pos + Vec{ 0, 0, h * cfg.vaultMaxFrac + 10.0f };
+			Hit         hi;
+			if (r.Cast(over, over + dir * (wall + 70.0f), hi) && !IsActorRef(hi.ref)) {
+				return false;  // taller than a vault (wall, shelf, door frame)
+			}
+			Reject first = Reject::kOk;
+			for (float extra : { 90.0f, 130.0f, 60.0f }) {
+				if (a_plans <= 0 || wall + extra > dh - 30.0f) {
+					break;
+				}
+				--a_plans;
+				Plan       plan;
+				const auto rj = PlanJump(a_actor, a_caps, pos, pos + dir * (wall + extra), nullptr, plan);
+				if (rj == Reject::kOk && std::fabs(plan.end.z - pos.z) <= cfg.vaultMaxDz) {
+					if (cfg.log) {
+						auto* n = a_actor->GetName();
+						logger::info("[{}] VAULT {:08X} '{}' over obstacle at {:.0f}u toward target {:.0f}u away", Tuning::ModeLabel(), a_actor->GetFormID(),
+							n ? n : "", wall, dh);
+					}
+					Launch(a_actor, a_caps, plan, Trigger::kShortcut, 0.0f);
+					a_memo.cooldownUntil = g_time + cfg.cooldown;
+					return true;
+				}
+				first = first == Reject::kOk ? (rj == Reject::kOk ? Reject::kLanding : rj) : first;
+			}
+			if (cfg.log && first != Reject::kOk) {
+				auto* n = a_actor->GetName();
+				logger::info("[{}] VAULTREJECT {:08X} '{}' obstacle at {:.0f}u: {}", Tuning::ModeLabel(), a_actor->GetFormID(), n ? n : "", wall, RejectName(first));
+			}
+			return false;
+		}
+
 		void Evaluate(RE::Actor* a_actor, int& a_plans)
 		{
 			const auto& cfg = Config::Get().jump;
@@ -1880,6 +1941,9 @@ namespace JumpNav
 					}
 				}
 			} else if (cfg.follow && following) {
+				if (caps.jumps && cfg.vault && TryVaultToward(a_actor, caps, player, m, a_plans)) {
+					return;
+				}
 				// A follower that has not really moved for a moment (pressed against a rock or ledge, or standing
 				// still) while the player is away first tries to climb what is in front of it, toward the player
 				// and then the way it faces. A follower walking up stairs behind the player keeps moving, so it
