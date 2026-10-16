@@ -896,6 +896,8 @@ namespace JumpNav
 			double          animNext = 0;     // next moveStart refresh
 			double          seeNext = 0;      // next perception check (combat routes)
 			float           idleT = 0;        // how long the actor's AI has not wanted to move
+			Vec             blockPt;          // where the last walk-block ray hit (ground height)
+			bool            haveBlockPt = false;
 		};
 
 		std::vector<Search> g_searches;
@@ -1043,7 +1045,7 @@ namespace JumpNav
 			return "headroomMid";
 		}
 
-		std::unordered_map<RE::FormID, std::pair<double, std::vector<std::uint64_t>>> g_bad;
+		std::unordered_map<RE::FormID, std::pair<double, std::unordered_set<std::uint64_t>>> g_bad;
 
 		void MarkBad(RE::FormID a_id, const Vec& p)
 		{
@@ -1052,15 +1054,31 @@ namespace JumpNav
 				b.second.clear();
 			}
 			b.first = g_time + 30.0;
-			if (b.second.size() < 40) {
-				b.second.push_back(Key(p));
+			if (b.second.size() < 2000) {
+				b.second.insert(Key(p));
+			}
+		}
+
+		// Marks every grid cell within a_cells (48u each) of p, one height step up and down, so the next search goes
+		// around an obstacle instead of re-planning a path that brushes the same rock a few units to the side.
+		void MarkBadArea(RE::FormID a_id, const Vec& p, int a_cells)
+		{
+			for (int dx = -a_cells; dx <= a_cells; ++dx) {
+				for (int dy = -a_cells; dy <= a_cells; ++dy) {
+					if (dx * dx + dy * dy > a_cells * a_cells + 1) {
+						continue;
+					}
+					for (int dz = -1; dz <= 1; ++dz) {
+						MarkBad(a_id, { p.x + dx * 48.0f, p.y + dy * 48.0f, p.z + dz * 60.0f });
+					}
+				}
 			}
 		}
 
 		bool IsBad(RE::FormID a_id, std::uint64_t a_key)
 		{
 			auto it = g_bad.find(a_id);
-			return it != g_bad.end() && g_time <= it->second.first && std::ranges::find(it->second.second, a_key) != it->second.second.end();
+			return it != g_bad.end() && g_time <= it->second.first && it->second.second.contains(a_key);
 		}
 
 		void Push(Search& s, int a_parent, const Vec& q, float a_cost, bool a_jump, bool a_climb = false, bool a_hang = false, float a_dx = 0, float a_dy = 0)
@@ -1464,6 +1482,8 @@ namespace JumpNav
 								np = cur;
 								blockedNow = true;
 								g.blocked += a_dt;
+								g.blockPt = { k.point.x, k.point.y, cur.z };
+								g.haveBlockPt = true;
 								if (!g.warned && cfg.log) {
 									g.warned = true;
 									logger::info("[{}] WALKBLOCK {:08X} '{}' hit '{}' ({:08X}) at z+{:.0f} dist={:.0f}", Tuning::ModeLabel(), g.id, g.name,
@@ -1475,6 +1495,17 @@ namespace JumpNav
 						}
 						if (g.blocked > 0.5f) {
 							MarkBad(g.id, g.pts[g.i].p);
+							// Block off the area around what stopped it (and the waypoint it was heading for), so the next
+							// route goes around it, or jumps or climbs, instead of walking into the same rock again.
+							const int cells = std::clamp(static_cast<int>(std::ceil(g.caps.radius / 48.0f)), 1, 2);
+							if (g.haveBlockPt) {
+								MarkBadArea(g.id, g.blockPt, cells);
+							}
+							MarkBadArea(g.id, g.pts[g.i].p, 1);
+							if (cfg.log) {
+								logger::info("[{}] BLOCKAREA {:08X} '{}' marked {}-cell area at ({:.0f},{:.0f},{:.0f}) for 30s", Tuning::ModeLabel(), g.id, g.name,
+									cells, g.blockPt.x, g.blockPt.y, g.blockPt.z);
+							}
 							EndGlide(g, "blocked", false);
 							it = g_glides.erase(it);
 							continue;
