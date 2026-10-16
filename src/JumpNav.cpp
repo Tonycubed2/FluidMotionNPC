@@ -1200,6 +1200,18 @@ namespace JumpNav
 					climbs += p.climb;
 				pts.push_back(p.p);
 			}
+			// In combat, a route with no jump or climb toward a target on the same level is just walking on flat ground,
+			// which the game's own AI already does. Driving it by hand made enemies (trolls) chase at full run speed,
+			// catch up until they hit, and slide at the end of roars while the AI was circling or posturing.
+			if (a_actor->IsInCombat() && jumps == 0 && climbs == 0 &&
+				std::fabs(s.goal.z - s.start.z) < Config::Get().jump.meleeRise * s.caps.height) {
+				m.routeNext = g_time + 3.0;
+				if (cfg.log) {
+					logger::info("[{}] ROUTESKIP {:08X} '{}' why={} flat same-level combat route (nodes={} cost={:.0f})", Tuning::ModeLabel(), s.id, s.name,
+						s.stuck ? "stuck" : "detour", g.pts.size(), g.len);
+				}
+				return;
+			}
 			Count([](Stats& st) { ++st.routes; });
 			if (cfg.log) {
 				logger::info("[{}] ROUTE {:08X} '{}' why={} {} nodes={} jumps={} climbs={} cost={:.0f} vanilla={:.0f} expanded={} goalDist={:.0f}",
