@@ -67,6 +67,7 @@ namespace Config
 		float vertMismatch = 1.0f;
 		float giantHeight = 220.0f;
 		float giantDistMax = 700.0f;
+		float creatureJumpScale = 1.0f;
 		float giantUpPerHeight = 1.4f;
 		float giantDistPerHeight = 2.6f;
 		std::string npcStartEvent = "JumpDirectionalStart";

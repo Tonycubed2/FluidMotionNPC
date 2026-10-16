@@ -115,6 +115,7 @@ namespace Config
 		getf("fVertMismatch", j.vertMismatch);
 		getf("fGiantHeight", j.giantHeight);
 		getf("fGiantDistMax", j.giantDistMax);
+		getf("fCreatureJumpScale", j.creatureJumpScale);
 		getf("fGiantUpPerHeight", j.giantUpPerHeight);
 		getf("fGiantDistPerHeight", j.giantDistPerHeight);
 		j.npcStartEvent = ini.GetValue("Jump", "sNpcStartEvent", j.npcStartEvent.c_str());

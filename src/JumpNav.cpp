@@ -133,6 +133,16 @@ namespace JumpNav
 				a_caps.down = cfg.downMax;
 				a_caps.dist = std::clamp(a_caps.height * cfg.distPerHeight, cfg.distMin, cfg.distMax);
 			}
+			// Optional: creatures (non-humanoid races: trolls, bears, wolves...) jump lower / shorter than people.
+			if (a_caps.jumps && cfg.creatureJumpScale != 1.0f && race && !race->HasKeywordString("ActorTypeNPC")) {
+				const float k = std::clamp(cfg.creatureJumpScale, 0.0f, 1.5f);
+				a_caps.up *= k;
+				a_caps.dist *= k;
+				if (a_caps.up < 30.0f) {
+					a_caps.jumps = false;
+					a_caps.up = a_caps.down = a_caps.dist = 0.0f;
+				}
+			}
 			a_caps.npc = Mantle::CanClimb(a_actor);
 			return true;
 		}
@@ -776,14 +786,11 @@ namespace JumpNav
 					continue;
 				}
 				// Sometimes the behaviour graph ignores the land event and stays in its jump state. It then ignores
-				// the walk events too and the NPC skates along on its run speed. ONE retry, only when a second after
-				// touchdown it is still in the jump state and sliding along the ground. A normal landing animation
-				// also counts as "jump state", so repeated re-sends restarted it (head-bob "pecking").
+				// the walk events too and the NPC skates along on its run speed, or keeps hopping in place. ONE retry,
+				// when a second after touchdown (landing animation over) it is still in the jump state, moving or not.
+				// Repeated re-sends restarted the landing animation (head-bob "pecking"), so never more than one.
 				auto* cc = actor->GetCharController();
-				Vec   hv;
-				actor->GetLinearVelocity(hv);
-				if (it->landNext > 0 && g_time >= it->landNext && actor->IsInJumpState() && cc && cc->context.currentState == RE::hkpCharacterStateType::kOnGround &&
-					Len2D(hv) > 60.0f) {
+				if (it->landNext > 0 && g_time >= it->landNext && actor->IsInJumpState() && cc && cc->context.currentState == RE::hkpCharacterStateType::kOnGround) {
 					it->landNext = 0;  // never again for this landing
 					bool anim = false;
 					SendEvent(actor, it->npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
@@ -1440,7 +1447,13 @@ namespace JumpNav
 					g.climbWait = 0;
 					++g.i;
 				} else {
-					const Motion mv = RaceMotion(actor);
+					Motion mv = RaceMotion(actor);
+					// In combat, never move it faster than its own AI is asking to run (race full speed made attackers
+					// close in at "super speed"). If its AI has stopped asking (level-gap chase), use 60% of full run.
+					if (actor->IsInCombat()) {
+						const float cmd = Locomotion::CommandedSpeed(g.id);
+						mv.run = (std::min)(mv.run, (std::max)(cmd * 1.05f, 0.6f * mv.run));
+					}
 					const Vec    wp = g.pts[g.i].p;
 					const Vec    to = wp - cur;
 					const float  dh = (std::max)(Len2D(to), 0.01f);
