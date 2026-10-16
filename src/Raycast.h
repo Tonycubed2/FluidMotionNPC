@@ -103,4 +103,26 @@ namespace Raycast
 	};
 
 	inline bool IsActorRef(RE::TESObjectREFR* a_ref) { return a_ref && a_ref->Is(RE::FormType::ActorCharacter); }
+
+	// A hit on a character: its ref is an actor, or it is one of the layers characters (and what they hold) are made of.
+	// A blocking shield or a drawn weapon can come back with no ref at all; without the layer check it looked like a
+	// wall and enemies tried to climb onto the player.
+	inline bool IsActorHit(const Hit& a_hit)
+	{
+		using L = RE::COL_LAYER;
+		switch (a_hit.layer) {
+		case L::kBiped:
+		case L::kBipedNoCC:
+		case L::kCharController:
+		case L::kDeadBip:
+		case L::kWeapon:
+		case L::kProjectile:
+		case L::kSpell:
+		case L::kConeProjectile:
+		case L::kShellCasting:
+			return true;
+		default:
+			return IsActorRef(a_hit.ref);
+		}
+	}
 }

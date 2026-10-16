@@ -19,6 +19,7 @@ namespace JumpNav
 		using Raycast::Caster;
 		using Raycast::Hit;
 		using Raycast::IsActorRef;
+		using Raycast::IsActorHit;
 
 		constexpr float kEvalInterval = 0.25f;
 		constexpr int   kPlansPerFrame = 2;
@@ -332,7 +333,7 @@ namespace JumpNav
 			if (!ray.Cast(a_end + Vec{ 0, 0, 60 }, a_end - Vec{ 0, 0, 120 }, hit)) {
 				return Reject::kLanding;
 			}
-			if (IsActorRef(hit.ref)) {
+			if (IsActorHit(hit)) {
 				return Reject::kOccupied;
 			}
 			a_end.z = hit.point.z;
@@ -360,7 +361,7 @@ namespace JumpNav
 					if (!ray.Cast(from, to, hit)) {
 						break;
 					}
-					if (IsActorRef(hit.ref)) {
+					if (IsActorHit(hit)) {
 						if (hit.ref != a_ignore) {
 							return Reject::kOccupied;
 						}
@@ -924,7 +925,7 @@ namespace JumpNav
 		bool Ground(const Caster& r, float x, float y, float zTop, float zBot, Vec& out)
 		{
 			Hit h;
-			if (!r.Cast({ x, y, zTop }, { x, y, zBot }, h) || IsActorRef(h.ref)) {
+			if (!r.Cast({ x, y, zTop }, { x, y, zBot }, h) || IsActorHit(h)) {
 				return false;
 			}
 			out = { x, y, h.point.z };
@@ -971,7 +972,7 @@ namespace JumpNav
 					if (!r.Cast(from, b, k)) {
 						return false;
 					}
-					if (!IsActorRef(k.ref)) {
+					if (!IsActorHit(k)) {
 						return true;
 					}
 					const Vec  d = b - from;
@@ -1019,7 +1020,7 @@ namespace JumpNav
 			if (!r.Cast({ top.x, top.y, p.z + maxRise + 15 }, { top.x, top.y, p.z - 70 }, q3)) {
 				return "noGround";
 			}
-			if (IsActorRef(q3.ref)) {
+			if (IsActorHit(q3)) {
 				return "groundIsActor " + who(q3);
 			}
 			if (q3.point.z - p.z > maxRise) {
@@ -1029,7 +1030,7 @@ namespace JumpNav
 				return "deepWater";
 			}
 			if (!r.Cast({ p.x + dx * len * 0.5f, p.y + dy * len * 0.5f, p.z + maxRise + 15 }, { p.x + dx * len * 0.5f, p.y + dy * len * 0.5f, p.z - 70 }, m3) ||
-				IsActorRef(m3.ref) || std::fabs(m3.point.z - (p.z + q3.point.z) * 0.5f) > 40) {
+				IsActorHit(m3) || std::fabs(m3.point.z - (p.z + q3.point.z) * 0.5f) > 40) {
 				return std::format("midpoint dev {:.0f}", m3.point.z - (p.z + q3.point.z) * 0.5f);
 			}
 			const Vec q = q3.point;
@@ -1478,7 +1479,7 @@ namespace JumpNav
 						const float len = step + g.caps.radius * 0.7f + 8.0f, h = g.caps.height;
 						Hit         k;
 						for (float hz : { (std::max)(35.0f, h * 0.35f), h * 0.8f }) {
-							if (r.Cast(cur + Vec{ 0, 0, hz }, cur + fwd * len + Vec{ 0, 0, hz }, k) && !Raycast::IsActorRef(k.ref)) {
+							if (r.Cast(cur + Vec{ 0, 0, hz }, cur + fwd * len + Vec{ 0, 0, hz }, k) && !Raycast::IsActorHit(k)) {
 								np = cur;
 								blockedNow = true;
 								g.blocked += a_dt;
@@ -1867,13 +1868,13 @@ namespace JumpNav
 			const float probe = (std::min)(dh - 60.0f, 160.0f);
 			const Vec   knee = pos + Vec{ 0, 0, h * 0.3f };
 			Hit         lo;
-			if (!r.Cast(knee, knee + dir * probe, lo) || IsActorRef(lo.ref)) {
+			if (!r.Cast(knee, knee + dir * probe, lo) || IsActorHit(lo)) {
 				return false;  // nothing in the way at knee height
 			}
 			const float wall = Len2D(lo.point - pos);
 			const Vec   over = pos + Vec{ 0, 0, h * cfg.vaultMaxFrac + 10.0f };
 			Hit         hi;
-			if (r.Cast(over, over + dir * (wall + 70.0f), hi) && !IsActorRef(hi.ref)) {
+			if (r.Cast(over, over + dir * (wall + 70.0f), hi) && !IsActorHit(hi)) {
 				return false;  // taller than a vault (wall, shelf, door frame)
 			}
 			Reject first = Reject::kOk;

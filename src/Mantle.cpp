@@ -77,7 +77,7 @@ namespace Mantle
 		for (float k : { 0.3f, 0.5f, 0.7f }) {
 			Raycast::Hit hit;
 			const V      from = P + V{ 0, 0, h * k };
-			if (ray.Cast(from, from + dir * maxWall, hit) && !Raycast::IsActorRef(hit.ref) && std::fabs(hit.normal.z) < 0.6f) {
+			if (ray.Cast(from, from + dir * maxWall, hit) && !Raycast::IsActorHit(hit) && std::fabs(hit.normal.z) < 0.6f) {
 				const float d = (hit.point - from).Length();
 				if (d < best) {
 					best = d;
@@ -103,7 +103,7 @@ namespace Mantle
 		bool         haveTop = false;
 		for (float depth : { 14.0f, 26.0f }) {
 			const V in = wall.point - n * depth;
-			if (ray.Cast({ in.x, in.y, P.z + h * 1.6f }, { in.x, in.y, P.z + 20.0f }, top) && top.normal.z >= 0.5f && !Raycast::IsActorRef(top.ref)) {
+			if (ray.Cast({ in.x, in.y, P.z + h * 1.6f }, { in.x, in.y, P.z + 20.0f }, top) && top.normal.z >= 0.5f && !Raycast::IsActorHit(top)) {
 				haveTop = true;
 				break;
 			}
@@ -120,7 +120,7 @@ namespace Mantle
 			Raycast::Hit tmp;
 			const V      f = wall.point - fwd * 30.0f;
 			const V      f0{ f.x, f.y, top.point.z - 20.0f };
-			if (!ray.Cast(f0, f0 + fwd * 60.0f, tmp) || Raycast::IsActorRef(tmp.ref)) {
+			if (!ray.Cast(f0, f0 + fwd * 60.0f, tmp) || Raycast::IsActorHit(tmp)) {
 				return false;
 			}
 		} else if (H < cfg.climbMin || H > cfg.climbMaxFrac * h) {
@@ -133,15 +133,15 @@ namespace Mantle
 		for (float d : { dmax, dmax - 8.0f, 26.0f }) {
 			const V      s = wall.point + fwd * d;
 			Raycast::Hit tmp;
-			if (ray.Cast({ s.x, s.y, top.point.z + 2.0f }, { s.x, s.y, top.point.z + h * (air ? 0.55f : 0.9f) }, tmp) && !Raycast::IsActorRef(tmp.ref)) {
+			if (ray.Cast({ s.x, s.y, top.point.z + 2.0f }, { s.x, s.y, top.point.z + h * (air ? 0.55f : 0.9f) }, tmp) && !Raycast::IsActorHit(tmp)) {
 				continue;
 			}
 			float standZ = top.point.z;
 			if (!ray.Cast({ s.x, s.y, top.point.z + 30.0f }, { s.x, s.y, top.point.z - 12.0f }, tmp) ||
-				(!Raycast::IsActorRef(tmp.ref) && (std::fabs(tmp.point.z - top.point.z) > 24.0f || tmp.normal.z < 0.5f))) {
+				(!Raycast::IsActorHit(tmp) && (std::fabs(tmp.point.z - top.point.z) > 24.0f || tmp.normal.z < 0.5f))) {
 				continue;
 			}
-			if (!Raycast::IsActorRef(tmp.ref)) {
+			if (!Raycast::IsActorHit(tmp)) {
 				standZ = tmp.point.z;
 			}
 			o.stand = { s.x, s.y, standZ };
@@ -242,6 +242,25 @@ namespace Mantle
 		const V     dir = a_dir ? *a_dir : V{ std::sin(ang), std::cos(ang), 0.0f };
 		Plan        plan;
 		if (!PlanClimb(ray, a->GetPosition(), dir, h, a_maxWall, a_air, plan, a_window)) {
+			return false;
+		}
+		// Never climb onto a person: reject a ledge or landing spot inside the player or the actor's combat target
+		// (whatever the rays hit there - shield, weapon, armour - belongs to them, not to the world).
+		auto onActor = [&](RE::Actor* o) {
+			if (!o || o == a || o->IsDead() || !o->Is3DLoaded()) {
+				return false;
+			}
+			const V     op = o->GetPosition();
+			const float oh = (std::max)(o->GetHeight(), 100.0f);
+			for (const V& q : { plan.edge, plan.stand }) {
+				if (std::hypot(q.x - op.x, q.y - op.y) < 75.0f && q.z > op.z - 30.0f && q.z < op.z + oh + 30.0f) {
+					return true;
+				}
+			}
+			return false;
+		};
+		RE::NiPointer<RE::Actor> tgt = a->GetActorRuntimeData().currentCombatTarget.get();
+		if (onActor(RE::PlayerCharacter::GetSingleton()) || onActor(tgt.get())) {
 			return false;
 		}
 		return Start(a, plan);
