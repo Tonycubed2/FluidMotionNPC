@@ -1318,10 +1318,13 @@ namespace JumpNav
 
 
 		// ---------------------------------------------------------------------------------------------------------
-		// Deep scan (v17, bDeepScan). After an actor's normal routes to the same target failed iDeepScanAfter times in
-		// a row, map the ground around it and its target on a grid (one downward ray per cell, spread over frames),
-		// then plan on that map with walks and jumps. Much wider than the step-by-step search, and when there is no
-		// way at all the actor stops trying for fDeepScanPause seconds instead of pacing along the cliff.
+		// Deep scan (bDeepScan). After an actor's normal routes to the same target failed iDeepScanAfter times in a
+		// row, map the ground around it and its target on a grid (one downward ray per cell, spread over frames),
+		// then plan on that map with walks and jumps. v18: before a planned route is used, every walking step and
+		// every jump is checked with the same precise tests the actor will face (body-width walk rays, the real
+		// jump planner), and take-off / landing spots are re-sampled at 8u around each jump. A failing step or jump
+		// is taken out of the map and the route re-planned (no new map rays), up to iDeepScanRetries times. When
+		// there is no way at all the actor stops trying for fDeepScanPause seconds instead of pacing along the cliff.
 		// Outdoors only: indoors a downward ray hits the ceiling first.
 		// ---------------------------------------------------------------------------------------------------------
 		struct DeepScan
@@ -1336,15 +1339,19 @@ namespace JumpNav
 			float           cell = 32, ox = 0, oy = 0, zTop = 0, zBot = 0;
 			int             W = 0, H = 0;
 			std::size_t     next = 0;
-			std::vector<float> h;  // ground height per cell, NaN = no usable ground (trunk, deep water, nothing)
-			int             rays = 0, frames = 0;
-			bool            searching = false;
+			std::vector<float> h;  // ground height per cell, NaN = no usable ground (trunk, deep water, nothing, failed walk)
+			int             rays = 0, frames = 0, phase = 0;  // 0 = mapping, 1 = searching, 2 = checking the route
 			std::vector<float>         g;
 			std::vector<int>           parent;
 			std::vector<std::uint8_t>  jump;
 			std::vector<std::uint8_t>  closed;
 			std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<>> open;
-			int             startIdx = -1, goalIdx = -1, best = -1, expanded = 0;
+			int             startIdx = -1, end = -1, best = -1, expanded = 0;
+			bool            reached = false;
+			int             attempts = 0, badJumps = 0, badWalks = 0, checkRays = 0;
+			std::unordered_set<std::uint64_t> bannedJumps;  // from * N + to
+			std::vector<Pt> route;                          // the checked route, ready to drive
+			int             routeJumps = 0;
 		};
 		std::vector<DeepScan> g_deep;
 
@@ -1431,37 +1438,191 @@ namespace JumpNav
 			return false;
 		}
 
+		Vec DeepCellPos(const DeepScan& d, int i)
+		{
+			return { d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.h[i] };
+		}
+
 		bool DeepGoal(const DeepScan& d, int i)
 		{
-			const Vec   c{ d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.h[i] };
-			const Vec   tg = d.goal - c;
+			const Vec   tg = d.goal - DeepCellPos(d, i);
 			const float hh = d.caps.height;
 			return Len2D(tg) <= d.gap && (d.melee ? tg.z <= Config::Get().jump.meleeRise * hh && tg.z >= -0.9f * hh : std::fabs(tg.z) <= 100.0f);
+		}
+
+		void DeepResetSearch(DeepScan& d)
+		{
+			const int N = d.W * d.H;
+			d.g.assign(N, 1e30f);
+			d.parent.assign(N, -1);
+			d.jump.assign(N, 0);
+			d.closed.assign(N, 0);
+			d.open = {};
+			d.g[d.startIdx] = 0;
+			d.best = d.startIdx;
+			d.end = -1;
+			d.reached = false;
+			d.open.push({ 0.0f, d.startIdx });
+		}
+
+		// Checks the planned chain of cells with the precise tests and builds the drivable route. On a failing step or
+		// jump, takes it out of the map (walk: cell blocked; jump: that take-off->landing pair banned) and returns false.
+		bool DeepCheckRoute(DeepScan& d, RE::Actor* a_actor)
+		{
+			const auto& cfg = Config::Get().jump;
+			std::vector<int> chain;
+			for (int i = d.end; i >= 0; i = d.parent[i]) {
+				chain.push_back(i);
+			}
+			std::ranges::reverse(chain);
+			Caster r;
+			if (!r.Init(a_actor)) {
+				return false;
+			}
+			Search walk;  // only for WalkEdge's caps / water / ground cache
+			walk.caps = d.caps;
+			walk.waterZ = d.waterZ;
+			auto* goalRef = RE::TESForm::LookupByID<RE::TESObjectREFR>(d.goalId);
+			const int N = d.W * d.H;
+
+			d.route.clear();
+			d.routeJumps = 0;
+			Vec cur = a_actor->GetPosition();
+			d.route.push_back({ cur, false, false, false, 0.0f, 0.0f });
+			int sinceKept = 0;
+			for (std::size_t k = 1; k < chain.size(); ++k) {
+				const int i = chain[k];
+				const Vec cp = DeepCellPos(d, i);
+				if (d.jump[i]) {
+					// Jump: take-off candidates on the take-off cell (centre and toward the edge), landing candidates on an 8u
+					// patch around the landing cell, flattest first. First pair the real jump planner accepts wins.
+					const Vec  dir2 = cp - cur;
+					const float dl = (std::max)(Len2D(dir2), 1.0f);
+					const Vec  fw{ dir2.x / dl, dir2.y / dl, 0.0f };
+					std::vector<Vec> takeoffs{ cur };
+					for (float o : { 12.0f, 24.0f, -12.0f }) {
+						float z = 0;
+						const Vec q = cur + fw * o;
+						if (DeepGround(r, q.x, q.y, cur.z + 60.0f, cur.z - 60.0f, d.caps.height, z) && std::fabs(z - cur.z) < 14.0f) {
+							takeoffs.push_back({ q.x, q.y, z });
+						}
+					}
+					struct Cand
+					{
+						Vec   p;
+						float rough;
+					};
+					std::vector<Cand> lands;
+					float             patch[5][5];
+					for (int a = 0; a < 5; ++a) {
+						for (int b = 0; b < 5; ++b) {
+							float z = 0;
+							patch[a][b] = DeepGround(r, cp.x + (a - 2) * 8.0f, cp.y + (b - 2) * 8.0f, cp.z + 80.0f, cp.z - 80.0f, d.caps.height, z) ?
+							                  z :
+							                  std::numeric_limits<float>::quiet_NaN();
+						}
+					}
+					for (int a = 1; a < 4; ++a) {
+						for (int b = 1; b < 4; ++b) {
+							const float z = patch[a][b];
+							if (std::isnan(z) || std::fabs(z - cp.z) > 24.0f) {
+								continue;
+							}
+							float rough = 0;
+							for (auto [da, db] : { std::pair{ 1, 0 }, std::pair{ -1, 0 }, std::pair{ 0, 1 }, std::pair{ 0, -1 } }) {
+								const float n2 = patch[a + da][b + db];
+								rough = (std::max)(rough, std::isnan(n2) ? 40.0f : std::fabs(n2 - z));
+							}
+							lands.push_back({ { cp.x + (a - 2) * 8.0f, cp.y + (b - 2) * 8.0f, z }, rough });
+						}
+					}
+					std::ranges::sort(lands, {}, &Cand::rough);
+					if (lands.size() > 4) {
+						lands.resize(4);
+					}
+					d.checkRays += r.used;
+					r.used = 0;
+					bool ok = false;
+					for (const auto& to : takeoffs) {
+						for (const auto& la : lands) {
+							Plan plan;
+							if (PlanJump(a_actor, d.caps, to, la.p, goalRef, plan) == Reject::kOk) {
+								if (Len2D(to - cur) > 4.0f) {
+									d.route.push_back({ to, false, false, false, 0.0f, 0.0f });
+								}
+								d.route.push_back({ la.p, true, false, false, 0.0f, 0.0f });
+								++d.routeJumps;
+								cur = la.p;
+								ok = true;
+								break;
+							}
+						}
+						if (ok) {
+							break;
+						}
+					}
+					if (!ok) {
+						d.bannedJumps.insert(static_cast<std::uint64_t>(chain[k - 1]) * N + i);
+						++d.badJumps;
+						return false;
+					}
+					sinceKept = 0;
+					continue;
+				}
+				// Walk step: the same body-width checks as a normal route, in pieces of at most 48u.
+				Vec         p = cur;
+				const Vec   to = cp - p;
+				const float len = Len2D(to);
+				if (len > 1.0f) {
+					const int pieces = (std::max)(1, static_cast<int>(std::ceil(len / 48.0f)));
+					const float dx = to.x / len, dy = to.y / len, step = len / pieces;
+					for (int s = 0; s < pieces; ++s) {
+						Vec q;
+						if (!WalkEdge(walk, r, p, dx, dy, step, q)) {
+							if (i != d.startIdx) {
+								d.h[i] = std::numeric_limits<float>::quiet_NaN();
+							}
+							++d.badWalks;
+							d.checkRays += r.used;
+							return false;
+						}
+						p = q;
+					}
+				}
+				cur = { cp.x, cp.y, p.z };
+				const bool nextJump = k + 1 < chain.size() && d.jump[chain[k + 1]] != 0;
+				const bool last = k + 1 == chain.size();
+				if (++sinceKept >= 3 || nextJump || last) {
+					d.route.push_back({ cur, false, false, false, 0.0f, 0.0f });
+					sinceKept = 0;
+				}
+			}
+			d.checkRays += r.used;
+			(void)cfg;
+			return d.route.size() >= 2;
 		}
 
 		void FinishDeepScan(DeepScan& d, RE::Actor* a_actor)
 		{
 			const auto& cfg = Config::Get().jump;
 			auto&       m = g_memo[d.id];
-			const int   end = d.goalIdx >= 0 ? d.goalIdx : d.best;
-			auto        cellPos = [&](int i) { return Vec{ d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.h[i] }; };
-			const float gain = end >= 0 ? Len2D(d.goal - d.start) - Len2D(d.goal - cellPos(end)) : 0.0f;
-			const bool  ok = end >= 0 && end != d.startIdx && (d.goalIdx >= 0 || gain > 150.0f);
-			if (!ok) {
+			if (d.route.size() < 2) {
 				m.deepPauseTarget = d.goalId;
 				m.deepPauseUntil = g_time + cfg.deepScanPause;
 				Count([](Stats& st) { ++st.routesFailed; });
 				if (cfg.log) {
-					logger::info("[{}] DEEPSCAN {:08X} '{}' none: no walk/jump way found over {}x{} cells ({} rays, {} frames, {} expanded) - pausing routes {:.0f}s",
-						Tuning::ModeLabel(), d.id, d.name, d.W, d.H, d.rays, d.frames, d.expanded, cfg.deepScanPause);
+					logger::info("[{}] DEEPSCAN {:08X} '{}' none: no checked walk/jump way over {}x{} cells (attempts={} badJumps={} badWalks={} rays={}+{} "
+								 "frames={}) - pausing routes {:.0f}s",
+						Tuning::ModeLabel(), d.id, d.name, d.W, d.H, d.attempts, d.badJumps, d.badWalks, d.rays, d.checkRays, d.frames, cfg.deepScanPause);
 				}
 				return;
 			}
-			std::vector<int> chain;
-			for (int i = end; i >= 0; i = d.parent[i]) {
-				chain.push_back(i);
+			if (a_actor->IsInCombat() && d.routeJumps == 0 && std::fabs(d.goal.z - d.start.z) < cfg.meleeRise * d.caps.height) {
+				if (cfg.log) {
+					logger::info("[{}] DEEPSCAN {:08X} '{}' found only a flat same-level walk - left to the game's AI", Tuning::ModeLabel(), d.id, d.name);
+				}
+				return;
 			}
-			std::ranges::reverse(chain);
 			Glide g;
 			g.handle = d.handle;
 			g.id = d.id;
@@ -1470,31 +1631,8 @@ namespace JumpNav
 			g.goal = d.goal;
 			g.gap = d.gap;
 			g.caps = d.caps;
-			g.pts.push_back({ a_actor->GetPosition(), false, false, false, 0.0f, 0.0f });
-			int sinceKept = 0, jumps = 0;
-			for (std::size_t k = 1; k < chain.size(); ++k) {
-				const int  i = chain[k];
-				const bool isJump = d.jump[i] != 0;
-				const bool nextJump = k + 1 < chain.size() && d.jump[chain[k + 1]] != 0;
-				const bool last = k + 1 == chain.size();
-				++sinceKept;
-				// keep every jump landing, the take-off cell before a jump, the last cell, and one cell in three of walks
-				if (isJump || nextJump || last || sinceKept >= 3) {
-					g.pts.push_back({ cellPos(i), isJump, false, false, 0.0f, 0.0f });
-					jumps += isJump;
-					sinceKept = 0;
-				}
-			}
-			if (g.pts.size() < 2) {
-				return;
-			}
-			if (a_actor->IsInCombat() && jumps == 0 && std::fabs(d.goal.z - d.start.z) < cfg.meleeRise * d.caps.height) {
-				if (cfg.log) {
-					logger::info("[{}] DEEPSCAN {:08X} '{}' found only a flat same-level walk - left to the game's AI", Tuning::ModeLabel(), d.id, d.name);
-				}
-				return;
-			}
-			g.len = d.g[end];
+			g.pts = d.route;
+			g.len = d.g[d.end];
 			g.until = g_time + g.len / (std::min)(cfg.glideSpeed, 200.0f) * 2.0 + 8.0;
 			std::erase_if(g_glides, [&](const Glide& o) { return o.id == d.id; });
 			std::vector<Vec> pts;
@@ -1503,20 +1641,21 @@ namespace JumpNav
 			}
 			Count([](Stats& st) { ++st.routes; });
 			if (cfg.log) {
-				logger::info("[{}] ROUTE {:08X} '{}' why=deepscan {} nodes={} jumps={} climbs=0 cost={:.0f} rays={} frames={} expanded={} goalDist={:.0f}",
-					Tuning::ModeLabel(), d.id, d.name, d.goalIdx >= 0 ? "full" : "partial", g.pts.size(), jumps, g.len, d.rays, d.frames, d.expanded,
-					(d.goal - cellPos(end)).Length());
+				logger::info("[{}] ROUTE {:08X} '{}' why=deepscan {} nodes={} jumps={} climbs=0 cost={:.0f} attempts={} badJumps={} badWalks={} rays={}+{} "
+							 "frames={} expanded={} goalDist={:.0f}",
+					Tuning::ModeLabel(), d.id, d.name, d.reached ? "full" : "partial", g.pts.size(), d.routeJumps, g.len, d.attempts + 1, d.badJumps,
+					d.badWalks, d.rays, d.checkRays, d.frames, d.expanded, (d.goal - g.pts.back().p).Length());
 			}
-			RecordDebug(std::move(pts), true, std::format("deep route {} hops {} jumps", g.pts.size() - 1, jumps));
+			RecordDebug(std::move(pts), true, std::format("deep route {} hops {} jumps", g.pts.size() - 1, d.routeJumps));
 			g_glides.push_back(std::move(g));
 		}
 
-		// One frame of work: sample up to iDeepScanRays cells, then expand grid nodes. Returns true when finished.
+		// One frame of work. Returns true when finished (route in d.route, or none).
 		bool StepDeepScan(DeepScan& d, RE::Actor* a_actor)
 		{
 			const auto& cfg = Config::Get().jump;
 			++d.frames;
-			if (!d.searching) {
+			if (d.phase == 0) {
 				Caster r;
 				if (!r.Init(a_actor)) {
 					return true;
@@ -1534,50 +1673,63 @@ namespace JumpNav
 				if (d.next < d.h.size()) {
 					return false;
 				}
-				// grid ready: set up the search
-				const int N = d.W * d.H;
-				d.g.assign(N, 1e30f);
-				d.parent.assign(N, -1);
-				d.jump.assign(N, 0);
-				d.closed.assign(N, 0);
 				const int sx = std::clamp(static_cast<int>((d.start.x - d.ox) / d.cell), 0, d.W - 1);
 				const int sy = std::clamp(static_cast<int>((d.start.y - d.oy) / d.cell), 0, d.H - 1);
 				d.startIdx = sy * d.W + sx;
 				d.h[d.startIdx] = d.start.z;
-				d.g[d.startIdx] = 0;
-				d.best = d.startIdx;
-				d.open.push({ 0.0f, d.startIdx });
-				d.searching = true;
+				DeepResetSearch(d);
+				d.phase = 1;
 				return false;
 			}
-			auto cellPos = [&](int i) { return Vec{ d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.h[i] }; };
+			if (d.phase == 2) {
+				if (DeepCheckRoute(d, a_actor)) {
+					return true;
+				}
+				d.route.clear();
+				if (++d.attempts >= cfg.deepScanRetries) {
+					return true;
+				}
+				DeepResetSearch(d);
+				d.phase = 1;
+				return false;
+			}
 			const float c = d.cell;
+			const int   N = d.W * d.H;
 			const float upPer = c * (std::max)(0.75f, d.caps.steep / 90.0f);  // walkable rise per cell
 			const float downPer = c * 1.5f;
 			static constexpr int kDx[16] = { 1, 1, 0, -1, -1, -1, 0, 1, 2, 1, -1, -2, -2, -1, 1, 2 };
 			static constexpr int kDy[16] = { 0, 1, 1, 1, 0, -1, -1, -1, 1, 2, 2, 1, -1, -2, -2, -1 };
 			for (int n = 0; n < 1500; ++n) {
 				if (d.open.empty()) {
+					// No full way: a route that gets clearly closer is still worth checking.
+					const float gain = Len2D(d.goal - d.start) - Len2D(d.goal - DeepCellPos(d, d.best));
+					if (d.best != d.startIdx && gain > 150.0f) {
+						d.end = d.best;
+						d.phase = 2;
+						return false;
+					}
 					return true;
 				}
 				const int i = d.open.top().second;
 				d.open.pop();
-				if (d.closed[i]) {
+				if (d.closed[i] || std::isnan(d.h[i])) {
 					continue;
 				}
 				d.closed[i] = 1;
 				++d.expanded;
-				const Vec p = cellPos(i);
+				const Vec p = DeepCellPos(d, i);
 				if (DeepGoal(d, i)) {
-					d.goalIdx = i;
-					return true;
+					d.end = i;
+					d.reached = true;
+					d.phase = 2;
+					return false;
 				}
-				if (Len2D(d.goal - p) < Len2D(d.goal - cellPos(d.best))) {
+				if (Len2D(d.goal - p) < Len2D(d.goal - DeepCellPos(d, d.best))) {
 					d.best = i;
 				}
 				const int ix = i % d.W, iy = i / d.W;
 				auto      push = [&](int t, float cost, bool isJump) {
-                    if (d.closed[t] || IsBad(d.id, Key(cellPos(t)))) {
+                    if (d.closed[t] || IsBad(d.id, Key(DeepCellPos(d, t))) || (isJump && d.bannedJumps.contains(static_cast<std::uint64_t>(i) * N + t))) {
                         return;
                     }
                     const float ng = d.g[i] + cost;
@@ -1585,7 +1737,7 @@ namespace JumpNav
                         d.g[t] = ng;
                         d.parent[t] = i;
                         d.jump[t] = isJump;
-                        d.open.push({ ng + 1.2f * (d.goal - cellPos(t)).Length(), t });
+                        d.open.push({ ng + 1.2f * (d.goal - DeepCellPos(d, t)).Length(), t });
                     }
 				};
 				// walks to the 8 neighbours
@@ -1613,7 +1765,7 @@ namespace JumpNav
 					}
 					push(t, run * (1.0f + 0.5f * std::clamp(rough / c - 0.75f, 0.0f, 2.0f)), false);
 				}
-				// jumps in 16 directions (only where the walk around would not do: up a lip, over a gap)
+				// jumps in 16 directions
 				if (!d.caps.jumps) {
 					continue;
 				}

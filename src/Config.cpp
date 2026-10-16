@@ -123,6 +123,7 @@ namespace Config
 		j.deepScanMaxCells = std::clamp(static_cast<int>(ini.GetLongValue("Jump", "iDeepScanMaxCells", j.deepScanMaxCells)), 32, 160);
 		j.deepScanRays = std::clamp(static_cast<int>(ini.GetLongValue("Jump", "iDeepScanRays", j.deepScanRays)), 50, 2000);
 		getf("fDeepScanPause", j.deepScanPause);
+		j.deepScanRetries = std::clamp(static_cast<int>(ini.GetLongValue("Jump", "iDeepScanRetries", j.deepScanRetries)), 1, 12);
 		getf("fGiantUpPerHeight", j.giantUpPerHeight);
 		getf("fGiantDistPerHeight", j.giantDistPerHeight);
 		j.npcStartEvent = ini.GetValue("Jump", "sNpcStartEvent", j.npcStartEvent.c_str());
