@@ -116,6 +116,13 @@ namespace Config
 		getf("fGiantHeight", j.giantHeight);
 		getf("fGiantDistMax", j.giantDistMax);
 		getf("fCreatureJumpScale", j.creatureJumpScale);
+		j.deepScan = ini.GetBoolValue("Jump", "bDeepScan", j.deepScan);
+		j.deepScanAfter = std::clamp(static_cast<int>(ini.GetLongValue("Jump", "iDeepScanAfter", j.deepScanAfter)), 1, 10);
+		getf("fDeepScanCell", j.deepScanCell);
+		j.deepScanCell = std::clamp(j.deepScanCell, 16.0f, 64.0f);
+		j.deepScanMaxCells = std::clamp(static_cast<int>(ini.GetLongValue("Jump", "iDeepScanMaxCells", j.deepScanMaxCells)), 32, 160);
+		j.deepScanRays = std::clamp(static_cast<int>(ini.GetLongValue("Jump", "iDeepScanRays", j.deepScanRays)), 50, 2000);
+		getf("fDeepScanPause", j.deepScanPause);
 		getf("fGiantUpPerHeight", j.giantUpPerHeight);
 		getf("fGiantDistPerHeight", j.giantDistPerHeight);
 		j.npcStartEvent = ini.GetValue("Jump", "sNpcStartEvent", j.npcStartEvent.c_str());

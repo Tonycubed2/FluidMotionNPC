@@ -68,6 +68,12 @@ namespace Config
 		float giantHeight = 220.0f;
 		float giantDistMax = 700.0f;
 		float creatureJumpScale = 1.0f;
+		bool  deepScan = false;
+		int   deepScanAfter = 2;
+		float deepScanCell = 32.0f;
+		int   deepScanMaxCells = 96;
+		int   deepScanRays = 400;
+		float deepScanPause = 15.0f;
 		float giantUpPerHeight = 1.4f;
 		float giantDistPerHeight = 2.6f;
 		std::string npcStartEvent = "JumpDirectionalStart";

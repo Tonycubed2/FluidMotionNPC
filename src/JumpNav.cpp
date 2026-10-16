@@ -211,6 +211,13 @@ namespace JumpNav
 			Vec        stillPos{};
 			double     stillT = 0;
 			bool       haveStill = false;
+			// Deep scan (v17): failed routes in a row toward the same target, and a pause after a scan found no way.
+			int        fails = 0;
+			RE::FormID failTarget = 0;
+			double     failT = 0;
+			RE::FormID deepPauseTarget = 0;
+			double     deepPauseUntil = 0;
+			double     deepNext = 0;
 		};
 
 		struct Settle
@@ -239,6 +246,18 @@ namespace JumpNav
 			std::string      label;
 		};
 		std::deque<DebugEntry> g_debug;
+
+		// A route toward a_target failed (search found nothing or the route ended without arriving). Counts failures in a
+		// row for the deep scan; reset after 30 s or on another target.
+		void NoteFail(Memo& m, RE::FormID a_target)
+		{
+			if (m.failTarget != a_target || g_time - m.failT > 30.0) {
+				m.fails = 0;
+			}
+			m.failTarget = a_target;
+			m.failT = g_time;
+			++m.fails;
+		}
 
 		void RecordDebug(std::vector<Vec> a_points, bool a_launched, std::string a_label)
 		{
@@ -1223,6 +1242,7 @@ namespace JumpNav
 				return;
 			}
 			if (!ok) {
+				NoteFail(m, s.goalId);
 				Count([](Stats& st) { ++st.routesFailed; });
 				if (cfg.log) {
 					logger::info("[{}] ROUTEFAIL {:08X} '{}' why={} expanded={} reached={} gain={:.0f} cost={:.0f} vanilla={:.0f}",
@@ -1296,6 +1316,368 @@ namespace JumpNav
 			}
 		}
 
+
+		// ---------------------------------------------------------------------------------------------------------
+		// Deep scan (v17, bDeepScan). After an actor's normal routes to the same target failed iDeepScanAfter times in
+		// a row, map the ground around it and its target on a grid (one downward ray per cell, spread over frames),
+		// then plan on that map with walks and jumps. Much wider than the step-by-step search, and when there is no
+		// way at all the actor stops trying for fDeepScanPause seconds instead of pacing along the cliff.
+		// Outdoors only: indoors a downward ray hits the ceiling first.
+		// ---------------------------------------------------------------------------------------------------------
+		struct DeepScan
+		{
+			RE::ActorHandle handle;
+			RE::FormID      id = 0, goalId = 0;
+			std::string     name;
+			Caps            caps;
+			Vec             start, goal;
+			float           gap = 100, waterZ = -1e30f;
+			bool            melee = false;
+			float           cell = 32, ox = 0, oy = 0, zTop = 0, zBot = 0;
+			int             W = 0, H = 0;
+			std::size_t     next = 0;
+			std::vector<float> h;  // ground height per cell, NaN = no usable ground (trunk, deep water, nothing)
+			int             rays = 0, frames = 0;
+			bool            searching = false;
+			std::vector<float>         g;
+			std::vector<int>           parent;
+			std::vector<std::uint8_t>  jump;
+			std::vector<std::uint8_t>  closed;
+			std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<>> open;
+			int             startIdx = -1, goalIdx = -1, best = -1, expanded = 0;
+		};
+		std::vector<DeepScan> g_deep;
+
+		bool DeepScanning(RE::FormID a_id)
+		{
+			return std::ranges::any_of(g_deep, [&](const DeepScan& d) { return d.id == a_id; });
+		}
+
+		bool StartDeepScan(RE::Actor* a_actor, const Caps& a_caps, RE::TESObjectREFR* a_goal, float a_gap, Memo& a_memo)
+		{
+			const auto& cfg = Config::Get().jump;
+			auto*       cell = a_actor->GetParentCell();
+			if (!g_deep.empty() || g_time < a_memo.deepNext || !cell || cell->IsInteriorCell()) {
+				return false;
+			}
+			const Vec   pos = a_actor->GetPosition(), tp = a_goal->GetPosition();
+			const float c = cfg.deepScanCell, margin = 448.0f;
+			const float minx = (std::min)(pos.x, tp.x) - margin, maxx = (std::max)(pos.x, tp.x) + margin;
+			const float miny = (std::min)(pos.y, tp.y) - margin, maxy = (std::max)(pos.y, tp.y) + margin;
+			const int   W = static_cast<int>(std::ceil((maxx - minx) / c)), H = static_cast<int>(std::ceil((maxy - miny) / c));
+			if (W > cfg.deepScanMaxCells || H > cfg.deepScanMaxCells) {
+				return false;
+			}
+			DeepScan d;
+			d.handle = a_actor->GetHandle();
+			d.id = a_actor->GetFormID();
+			d.goalId = a_goal->GetFormID();
+			auto* n = a_actor->GetName();
+			d.name = n && *n ? n : "<unnamed>";
+			d.caps = a_caps;
+			d.start = pos;
+			d.goal = tp;
+			d.gap = a_caps.radius + a_gap + 40.0f;
+			d.melee = a_gap < 100.0f && a_actor->IsInCombat();
+			d.waterZ = cell->GetExteriorWaterHeight();
+			d.cell = c;
+			d.ox = minx;
+			d.oy = miny;
+			d.W = W;
+			d.H = H;
+			d.zTop = (std::max)(pos.z, tp.z) + (std::max)(a_caps.up, 150.0f) + 250.0f;
+			d.zBot = (std::min)(pos.z, tp.z) - 900.0f;
+			d.h.assign(static_cast<std::size_t>(W) * H, std::numeric_limits<float>::quiet_NaN());
+			a_memo.deepNext = g_time + 10.0;
+			a_memo.fails = 0;
+			if (cfg.log) {
+				logger::info("[{}] DEEPSCAN {:08X} '{}' start grid={}x{} cell={:.0f} dist={:.0f} dz={:+.0f}", Tuning::ModeLabel(), d.id, d.name, W, H, c,
+					Len2D(tp - pos), tp.z - pos.z);
+			}
+			g_deep.push_back(std::move(d));
+			return true;
+		}
+
+		// Top surface a creature could stand on at (x, y): skips actors, clutter, debris and non-solid layers. Tree hits
+		// are skipped too, but a trunk or low branches (anything below body height over the ground found) block the cell.
+		bool DeepGround(const Caster& r, float x, float y, float top, float bot, float bodyH, float& out)
+		{
+			Vec       from{ x, y, top };
+			const Vec to{ x, y, bot };
+			float     treeZ = 1e30f;
+			for (int n = 0; n < 6; ++n) {
+				Hit k;
+				if (!r.Cast(from, to, k)) {
+					return false;
+				}
+				using L = RE::COL_LAYER;
+				const bool tree = k.layer == L::kTrees;
+				if (!tree && !IsActorHit(k) && Raycast::SolidLayer(k.layer) && k.layer != L::kClutter && k.layer != L::kDebrisSmall &&
+					k.layer != L::kDebrisLarge) {
+					if (treeZ - k.point.z < bodyH) {
+						return false;
+					}
+					out = k.point.z;
+					return true;
+				}
+				if (tree) {
+					treeZ = (std::min)(treeZ, k.point.z);
+				}
+				from = k.point - Vec{ 0, 0, 2.0f };
+				if (from.z <= bot) {
+					return false;
+				}
+			}
+			return false;
+		}
+
+		bool DeepGoal(const DeepScan& d, int i)
+		{
+			const Vec   c{ d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.h[i] };
+			const Vec   tg = d.goal - c;
+			const float hh = d.caps.height;
+			return Len2D(tg) <= d.gap && (d.melee ? tg.z <= Config::Get().jump.meleeRise * hh && tg.z >= -0.9f * hh : std::fabs(tg.z) <= 100.0f);
+		}
+
+		void FinishDeepScan(DeepScan& d, RE::Actor* a_actor)
+		{
+			const auto& cfg = Config::Get().jump;
+			auto&       m = g_memo[d.id];
+			const int   end = d.goalIdx >= 0 ? d.goalIdx : d.best;
+			auto        cellPos = [&](int i) { return Vec{ d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.h[i] }; };
+			const float gain = end >= 0 ? Len2D(d.goal - d.start) - Len2D(d.goal - cellPos(end)) : 0.0f;
+			const bool  ok = end >= 0 && end != d.startIdx && (d.goalIdx >= 0 || gain > 150.0f);
+			if (!ok) {
+				m.deepPauseTarget = d.goalId;
+				m.deepPauseUntil = g_time + cfg.deepScanPause;
+				Count([](Stats& st) { ++st.routesFailed; });
+				if (cfg.log) {
+					logger::info("[{}] DEEPSCAN {:08X} '{}' none: no walk/jump way found over {}x{} cells ({} rays, {} frames, {} expanded) - pausing routes {:.0f}s",
+						Tuning::ModeLabel(), d.id, d.name, d.W, d.H, d.rays, d.frames, d.expanded, cfg.deepScanPause);
+				}
+				return;
+			}
+			std::vector<int> chain;
+			for (int i = end; i >= 0; i = d.parent[i]) {
+				chain.push_back(i);
+			}
+			std::ranges::reverse(chain);
+			Glide g;
+			g.handle = d.handle;
+			g.id = d.id;
+			g.goalId = d.goalId;
+			g.name = d.name;
+			g.goal = d.goal;
+			g.gap = d.gap;
+			g.caps = d.caps;
+			g.pts.push_back({ a_actor->GetPosition(), false, false, false, 0.0f, 0.0f });
+			int sinceKept = 0, jumps = 0;
+			for (std::size_t k = 1; k < chain.size(); ++k) {
+				const int  i = chain[k];
+				const bool isJump = d.jump[i] != 0;
+				const bool nextJump = k + 1 < chain.size() && d.jump[chain[k + 1]] != 0;
+				const bool last = k + 1 == chain.size();
+				++sinceKept;
+				// keep every jump landing, the take-off cell before a jump, the last cell, and one cell in three of walks
+				if (isJump || nextJump || last || sinceKept >= 3) {
+					g.pts.push_back({ cellPos(i), isJump, false, false, 0.0f, 0.0f });
+					jumps += isJump;
+					sinceKept = 0;
+				}
+			}
+			if (g.pts.size() < 2) {
+				return;
+			}
+			if (a_actor->IsInCombat() && jumps == 0 && std::fabs(d.goal.z - d.start.z) < cfg.meleeRise * d.caps.height) {
+				if (cfg.log) {
+					logger::info("[{}] DEEPSCAN {:08X} '{}' found only a flat same-level walk - left to the game's AI", Tuning::ModeLabel(), d.id, d.name);
+				}
+				return;
+			}
+			g.len = d.g[end];
+			g.until = g_time + g.len / (std::min)(cfg.glideSpeed, 200.0f) * 2.0 + 8.0;
+			std::erase_if(g_glides, [&](const Glide& o) { return o.id == d.id; });
+			std::vector<Vec> pts;
+			for (auto& p : g.pts) {
+				pts.push_back(p.p);
+			}
+			Count([](Stats& st) { ++st.routes; });
+			if (cfg.log) {
+				logger::info("[{}] ROUTE {:08X} '{}' why=deepscan {} nodes={} jumps={} climbs=0 cost={:.0f} rays={} frames={} expanded={} goalDist={:.0f}",
+					Tuning::ModeLabel(), d.id, d.name, d.goalIdx >= 0 ? "full" : "partial", g.pts.size(), jumps, g.len, d.rays, d.frames, d.expanded,
+					(d.goal - cellPos(end)).Length());
+			}
+			RecordDebug(std::move(pts), true, std::format("deep route {} hops {} jumps", g.pts.size() - 1, jumps));
+			g_glides.push_back(std::move(g));
+		}
+
+		// One frame of work: sample up to iDeepScanRays cells, then expand grid nodes. Returns true when finished.
+		bool StepDeepScan(DeepScan& d, RE::Actor* a_actor)
+		{
+			const auto& cfg = Config::Get().jump;
+			++d.frames;
+			if (!d.searching) {
+				Caster r;
+				if (!r.Init(a_actor)) {
+					return true;
+				}
+				const float wade = WadeMax(d.caps.height);
+				while (d.next < d.h.size() && r.used < cfg.deepScanRays) {
+					const int i = static_cast<int>(d.next++);
+					float     z = 0;
+					if (DeepGround(r, d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.zTop, d.zBot, d.caps.height, z) &&
+						z >= d.waterZ - wade) {
+						d.h[i] = z;
+					}
+				}
+				d.rays += r.used;
+				if (d.next < d.h.size()) {
+					return false;
+				}
+				// grid ready: set up the search
+				const int N = d.W * d.H;
+				d.g.assign(N, 1e30f);
+				d.parent.assign(N, -1);
+				d.jump.assign(N, 0);
+				d.closed.assign(N, 0);
+				const int sx = std::clamp(static_cast<int>((d.start.x - d.ox) / d.cell), 0, d.W - 1);
+				const int sy = std::clamp(static_cast<int>((d.start.y - d.oy) / d.cell), 0, d.H - 1);
+				d.startIdx = sy * d.W + sx;
+				d.h[d.startIdx] = d.start.z;
+				d.g[d.startIdx] = 0;
+				d.best = d.startIdx;
+				d.open.push({ 0.0f, d.startIdx });
+				d.searching = true;
+				return false;
+			}
+			auto cellPos = [&](int i) { return Vec{ d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.h[i] }; };
+			const float c = d.cell;
+			const float upPer = c * (std::max)(0.75f, d.caps.steep / 90.0f);  // walkable rise per cell
+			const float downPer = c * 1.5f;
+			static constexpr int kDx[16] = { 1, 1, 0, -1, -1, -1, 0, 1, 2, 1, -1, -2, -2, -1, 1, 2 };
+			static constexpr int kDy[16] = { 0, 1, 1, 1, 0, -1, -1, -1, 1, 2, 2, 1, -1, -2, -2, -1 };
+			for (int n = 0; n < 1500; ++n) {
+				if (d.open.empty()) {
+					return true;
+				}
+				const int i = d.open.top().second;
+				d.open.pop();
+				if (d.closed[i]) {
+					continue;
+				}
+				d.closed[i] = 1;
+				++d.expanded;
+				const Vec p = cellPos(i);
+				if (DeepGoal(d, i)) {
+					d.goalIdx = i;
+					return true;
+				}
+				if (Len2D(d.goal - p) < Len2D(d.goal - cellPos(d.best))) {
+					d.best = i;
+				}
+				const int ix = i % d.W, iy = i / d.W;
+				auto      push = [&](int t, float cost, bool isJump) {
+                    if (d.closed[t] || IsBad(d.id, Key(cellPos(t)))) {
+                        return;
+                    }
+                    const float ng = d.g[i] + cost;
+                    if (ng < d.g[t]) {
+                        d.g[t] = ng;
+                        d.parent[t] = i;
+                        d.jump[t] = isJump;
+                        d.open.push({ ng + 1.2f * (d.goal - cellPos(t)).Length(), t });
+                    }
+				};
+				// walks to the 8 neighbours
+				for (int k = 0; k < 8; ++k) {
+					const int tx = ix + kDx[k], ty = iy + kDy[k];
+					if (tx < 0 || ty < 0 || tx >= d.W || ty >= d.H) {
+						continue;
+					}
+					const int t = ty * d.W + tx;
+					if (std::isnan(d.h[t])) {
+						continue;
+					}
+					const float run = (k & 1) ? c * 1.41421f : c;
+					const float dz = d.h[t] - p.z;
+					if (dz > upPer * run / c || dz < -downPer * run / c) {
+						continue;
+					}
+					// rough ground (a lip right next to the cell) costs more, so smooth ground wins when there is a choice
+					float rough = 0;
+					for (int q = 0; q < 8; q += 2) {
+						const int ux = tx + kDx[q], uy = ty + kDy[q];
+						if (ux >= 0 && uy >= 0 && ux < d.W && uy < d.H && !std::isnan(d.h[uy * d.W + ux])) {
+							rough = (std::max)(rough, std::fabs(d.h[uy * d.W + ux] - d.h[t]));
+						}
+					}
+					push(t, run * (1.0f + 0.5f * std::clamp(rough / c - 0.75f, 0.0f, 2.0f)), false);
+				}
+				// jumps in 16 directions (only where the walk around would not do: up a lip, over a gap)
+				if (!d.caps.jumps) {
+					continue;
+				}
+				for (int k = 0; k < 16; ++k) {
+					const float dl = std::hypot(static_cast<float>(kDx[k]), static_cast<float>(kDy[k]));
+					for (float want : { d.caps.dist * 0.85f, 180.0f, 110.0f }) {
+						const int steps = static_cast<int>(std::round(want / (c * dl)));
+						if (steps < 1) {
+							continue;
+						}
+						const int tx = ix + kDx[k] * steps, ty = iy + kDy[k] * steps;
+						if (tx < 0 || ty < 0 || tx >= d.W || ty >= d.H) {
+							continue;
+						}
+						const int t = ty * d.W + tx;
+						if (std::isnan(d.h[t])) {
+							continue;
+						}
+						const float dz = d.h[t] - p.z;
+						const float dist = c * dl * steps;
+						if (dz > d.caps.up || dz < -d.caps.down || dist > d.caps.dist + 1.0f) {
+							continue;
+						}
+						// arc clearance over every cell under the jump (same arc model as JumpEdge)
+						const float apex = 40.0f + 0.4f * (std::max)(dz, 0.0f);
+						bool        clear = true;
+						const int   samples = steps * 2;
+						for (int u = 1; u < samples && clear; ++u) {
+							const float f = static_cast<float>(u) / samples;
+							const int   cx = static_cast<int>(std::floor(ix + 0.5f + kDx[k] * steps * f));
+							const int   cy = static_cast<int>(std::floor(iy + 0.5f + kDy[k] * steps * f));
+							const float gz = d.h[cy * d.W + cx];
+							if (!std::isnan(gz) && p.z + dz * f + 4.0f * apex * f * (1.0f - f) < gz + cfg.clearance) {
+								clear = false;
+							}
+						}
+						if (clear) {
+							push(t, 1.3f * dist + 80.0f + (d.jump[i] ? 160.0f : 0.0f), true);
+							break;
+						}
+					}
+				}
+			}
+			return false;
+		}
+
+		void TickDeepScans()
+		{
+			for (auto it = g_deep.begin(); it != g_deep.end();) {
+				auto  ptr = it->handle.get();
+				auto* actor = ptr.get();
+				if (!actor || actor->IsDead() || !actor->Is3DLoaded() || actor->GetPosition().GetDistance(it->start) > 400.0f) {
+					it = g_deep.erase(it);
+					continue;
+				}
+				if (StepDeepScan(*it, actor)) {
+					FinishDeepScan(*it, actor);
+					it = g_deep.erase(it);
+				} else {
+					++it;
+				}
+			}
+		}
+
 		void EndGlide(const Glide& g, const char* a_reason, bool a_done)
 		{
 			if (auto p = g.handle.get(); p.get()) {
@@ -1310,6 +1692,11 @@ namespace JumpNav
 			auto* gl = RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId);
 			const std::string_view why(a_reason);
 			const bool             voluntary = why.starts_with("calm") || why == "aistop" || why == "busy" || why == "parkour" || why == "claimed";
+			if (a_done) {
+				m.fails = 0;
+			} else if (!voluntary && why != "lost" && why != "goalmoved" && why != "arrived") {
+				NoteFail(m, g.goalId);
+			}
 			if (auto ptr = g.handle.get(); ptr.get() && gl && !voluntary &&
 				(Len2D(gl->GetPosition() - ptr->GetPosition()) > g.gap + 60.0f || gl->GetPosition().z - ptr->GetPosition().z > Config::Get().jump.meleeRise * g.caps.height)) {
 				m.forceStuck = true;
@@ -1612,7 +1999,8 @@ namespace JumpNav
 				mismatch = (Len2D(mv) < 50.0f || a_memo.forceStuck) && dh < 400.0f && vertOut;
 			}
 			if (dh > cfg.routeMaxDist || (dist < a_caps.radius + a_gap + 120.0f && !vertOut) || g_time < a_memo.routeNext || g_searches.size() >= 4 ||
-				Searching(a_actor->GetFormID()) || FindGlide(a_actor->GetFormID())) {
+				Searching(a_actor->GetFormID()) || FindGlide(a_actor->GetFormID()) || DeepScanning(a_actor->GetFormID()) ||
+				(a_memo.deepPauseTarget == a_goal->GetFormID() && g_time < a_memo.deepPauseUntil)) {
 				return;
 			}
 			const bool follower = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
@@ -1654,6 +2042,11 @@ namespace JumpNav
 				if (vanilla < cfg.minRatio * dist || vanilla - dist < cfg.minSaving) {
 					return;
 				}
+			}
+			if (cfg.deepScan && stuck && a_memo.fails >= cfg.deepScanAfter && a_memo.failTarget == a_goal->GetFormID() &&
+				StartDeepScan(a_actor, a_caps, a_goal, a_gap, a_memo)) {
+				a_memo.forceStuck = false;
+				return;
 			}
 			StartSearch(a_actor, a_caps, a_goal, a_gap, stuck, vanilla);
 			a_memo.forceStuck = false;
@@ -2119,6 +2512,7 @@ namespace JumpNav
 				return;
 			}
 			TickSearches();
+			TickDeepScans();
 
 			auto* lists = RE::ProcessLists::GetSingleton();
 			auto* player = RE::PlayerCharacter::GetSingleton();
@@ -2182,6 +2576,7 @@ namespace JumpNav
 		g_flights.clear();
 		g_glides.clear();
 		g_searches.clear();
+		g_deep.clear();
 		g_memo.clear();
 		g_settles.clear();
 		g_raceExcluded.clear();
