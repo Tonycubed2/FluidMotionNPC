@@ -1351,23 +1351,79 @@ namespace JumpNav
 			bool            reached = false;
 			int             attempts = 0, badJumps = 0, badWalks = 0, badClimbs = 0, checkRays = 0;
 			int             rejects[8]{};    // why candidate jumps failed the real jump planner (by Reject)
-			bool            reusedMap = false;
-			std::unordered_set<std::uint64_t> bannedJumps;  // from * N + to
+			std::unordered_set<std::uint64_t> bannedJumps;  // world-cell pair keys (WPair), shared with same-size NPCs
+			int             gx0 = 0, gy0 = 0;               // world cell of grid cell 0
+			int             cachedCells = 0;                // cells taken from the shared map instead of a ray
+			std::uint32_t   cls = 0;                        // size class (height, jump height, climbs, jumps)
+			std::uint64_t   noWayKey = 0;
 			std::vector<Pt> route;                          // the checked route, ready to drive
 			int             routeJumps = 0;
 		};
 		std::vector<DeepScan> g_deep;
 
-		// The last finished ground map, reused for 10 s by the next scan whose actor and target both lie inside it
-		// (several enemies chasing the same player up the same cliff map it once).
-		struct DeepMap
+		// ---- Shared map: ground heights on a world-aligned grid, stored in 16x16-cell tiles that every NPC reads and adds
+		// to. A scan only casts rays for cells nobody has measured in the last fDeepScanShareSec seconds, so NPCs moving
+		// around the same area build up one map together. What a cell stores does not depend on who measured it (raw
+		// ground height + lowest tree hit + the vertical range of the ray); body height and wading depth are applied
+		// per NPC when the cell is read.
+		constexpr int kTile = 16;
+		struct TileCell
 		{
-			double             t = -100;
-			float              ox = 0, oy = 0, cell = 0, zTop = 0, zBot = 0;
-			int                W = 0, H = 0;
-			std::vector<float> h;
+			float h = std::numeric_limits<float>::quiet_NaN();  // ground height (NaN = no ground in range)
+			float tree = 1e30f;                                   // lowest tree/branch hit above that ground
+			float top = -1e30f, bot = 1e30f;                      // vertical range the ray covered (-1e30 = never measured)
 		};
-		DeepMap g_deepMap;
+		struct Tile
+		{
+			double                                 t = 0;
+			std::array<TileCell, kTile * kTile>    c{};
+		};
+		std::unordered_map<std::uint64_t, Tile> g_tiles;
+		float                                   g_tileCell = 0;
+		// Results shared between NPCs of the same size class: jumps/climbs the precise check rejected, and "no way from
+		// this area to that target" verdicts.
+		std::unordered_map<std::uint32_t, std::unordered_map<std::uint64_t, double>> g_sharedBans;
+		std::unordered_map<std::uint64_t, double>                                    g_noWay;
+
+		int FloorDiv(int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
+
+		TileCell* CacheCell(int gx, int gy, bool a_write)
+		{
+			const int           tx = FloorDiv(gx, kTile), ty = FloorDiv(gy, kTile);
+			const std::uint64_t key = static_cast<std::uint64_t>(static_cast<std::uint32_t>(tx)) << 32 | static_cast<std::uint32_t>(ty);
+			const double        life = Config::Get().jump.deepScanShareSec;
+			auto                it = g_tiles.find(key);
+			if (it != g_tiles.end() && g_time - it->second.t > life) {
+				g_tiles.erase(it);
+				it = g_tiles.end();
+			}
+			if (it == g_tiles.end()) {
+				if (!a_write) {
+					return nullptr;
+				}
+				if (g_tiles.size() >= 600) {  // ~2.4 MB at most: drop the oldest tile
+					auto oldest = std::ranges::min_element(g_tiles, {}, [](const auto& kv) { return kv.second.t; });
+					g_tiles.erase(oldest);
+				}
+				it = g_tiles.emplace(key, Tile{}).first;
+			}
+			if (a_write) {
+				it->second.t = g_time;
+			}
+			return &it->second.c[(gy - ty * kTile) * kTile + (gx - tx * kTile)];
+		}
+
+		std::uint64_t WPair(int ax, int ay, int bx, int by)
+		{
+			return static_cast<std::uint64_t>(static_cast<std::uint16_t>(ax)) << 48 | static_cast<std::uint64_t>(static_cast<std::uint16_t>(ay)) << 32 |
+			       static_cast<std::uint64_t>(static_cast<std::uint16_t>(bx)) << 16 | static_cast<std::uint64_t>(static_cast<std::uint16_t>(by));
+		}
+
+		std::uint32_t SizeClass(const Caps& a_caps)
+		{
+			const auto q = [](float v) { return static_cast<std::uint32_t>(std::clamp(v / 16.0f, 0.0f, 255.0f)); };
+			return q(a_caps.height) << 16 | q(a_caps.up) << 8 | (a_caps.npc && Config::Get().anim.climb ? 2u : 0u) | (a_caps.jumps ? 1u : 0u);
+		}
 
 		bool DeepScanning(RE::FormID a_id)
 		{
@@ -1383,11 +1439,33 @@ namespace JumpNav
 			}
 			const Vec   pos = a_actor->GetPosition(), tp = a_goal->GetPosition();
 			const float c = cfg.deepScanCell, margin = 448.0f;
-			const float minx = (std::min)(pos.x, tp.x) - margin, maxx = (std::max)(pos.x, tp.x) + margin;
-			const float miny = (std::min)(pos.y, tp.y) - margin, maxy = (std::max)(pos.y, tp.y) + margin;
-			const int   W = static_cast<int>(std::ceil((maxx - minx) / c)), H = static_cast<int>(std::ceil((maxy - miny) / c));
+			if (g_tileCell != c) {
+				g_tiles.clear();
+				g_tileCell = c;
+			}
+			const int gx0 = static_cast<int>(std::floor(((std::min)(pos.x, tp.x) - margin) / c));
+			const int gy0 = static_cast<int>(std::floor(((std::min)(pos.y, tp.y) - margin) / c));
+			const int W = static_cast<int>(std::ceil(((std::max)(pos.x, tp.x) + margin) / c)) - gx0;
+			const int H = static_cast<int>(std::ceil(((std::max)(pos.y, tp.y) + margin) / c)) - gy0;
 			if (W > cfg.deepScanMaxCells || H > cfg.deepScanMaxCells) {
 				return false;
+			}
+			const std::uint32_t cls = SizeClass(a_caps);
+			auto                coarse = [&](float v) { return static_cast<int>(std::floor(v / 256.0f)); };
+			const std::uint64_t noWayKey = std::hash<std::string>{}(std::format("{}|{}|{}|{}|{}|{}", cls, coarse(pos.x), coarse(pos.y), coarse(tp.x), coarse(tp.y),
+				static_cast<int>(std::floor(tp.z / 128.0f))));
+			a_memo.deepNext = g_time + 10.0;
+			a_memo.fails = 0;
+			if (auto it = g_noWay.find(noWayKey); it != g_noWay.end() && g_time < it->second) {
+				// Another NPC of the same size already found no way from here to there: don't scan again.
+				a_memo.deepPauseTarget = a_goal->GetFormID();
+				a_memo.deepPauseUntil = it->second;
+				if (cfg.log) {
+					auto* n = a_actor->GetName();
+					logger::info("[{}] DEEPSCAN {:08X} '{}' shared: an NPC of the same size found no way from here to this target {:.0f}s ago - pausing routes",
+						Tuning::ModeLabel(), a_actor->GetFormID(), n ? n : "", cfg.deepScanPause - (it->second - g_time));
+				}
+				return true;
 			}
 			DeepScan d;
 			d.handle = a_actor->GetHandle();
@@ -1402,48 +1480,40 @@ namespace JumpNav
 			d.melee = a_gap < 100.0f && a_actor->IsInCombat();
 			d.waterZ = cell->GetExteriorWaterHeight();
 			d.cell = c;
-			d.ox = minx;
-			d.oy = miny;
+			d.gx0 = gx0;
+			d.gy0 = gy0;
+			d.ox = gx0 * c;
+			d.oy = gy0 * c;
 			d.W = W;
 			d.H = H;
+			d.cls = cls;
+			d.noWayKey = noWayKey;
 			d.zTop = (std::max)(pos.z, tp.z) + (std::max)(a_caps.up, 150.0f) + 250.0f;
 			d.zBot = (std::min)(pos.z, tp.z) - 900.0f;
 			d.h.assign(static_cast<std::size_t>(W) * H, std::numeric_limits<float>::quiet_NaN());
-			{
-				const auto& mp = g_deepMap;
-				auto inside = [&](const Vec& v) {
-					return v.x > mp.ox + 2 * c && v.y > mp.oy + 2 * c && v.x < mp.ox + (mp.W - 2) * c && v.y < mp.oy + (mp.H - 2) * c && v.z < mp.zTop - 150.0f &&
-					       v.z > mp.zBot + 150.0f;
-				};
-				if (g_time - mp.t < 10.0 && mp.cell == c && inside(pos) && inside(tp)) {
-					d.ox = mp.ox;
-					d.oy = mp.oy;
-					d.W = mp.W;
-					d.H = mp.H;
-					d.zTop = mp.zTop;
-					d.zBot = mp.zBot;
-					d.h = mp.h;
-					d.next = d.h.size();
-					d.reusedMap = true;
+			int shared = 0;
+			if (auto sb = g_sharedBans.find(cls); sb != g_sharedBans.end()) {
+				std::erase_if(sb->second, [](const auto& kv) { return kv.second < g_time; });
+				for (const auto& [k, until] : sb->second) {
+					d.bannedJumps.insert(k);
+					++shared;
 				}
 			}
-			a_memo.deepNext = g_time + 10.0;
-			a_memo.fails = 0;
 			if (cfg.log) {
-				logger::info("[{}] DEEPSCAN {:08X} '{}' start grid={}x{} cell={:.0f} dist={:.0f} dz={:+.0f} map={} climbs={}", Tuning::ModeLabel(), d.id, d.name,
-					d.W, d.H, c, Len2D(tp - pos), tp.z - pos.z, d.reusedMap ? "reused" : "new", d.caps.npc && Config::Get().anim.climb ? "yes" : "no");
+				logger::info("[{}] DEEPSCAN {:08X} '{}' start grid={}x{} cell={:.0f} dist={:.0f} dz={:+.0f} climbs={} sharedRejects={} mapTiles={}", Tuning::ModeLabel(),
+					d.id, d.name, d.W, d.H, c, Len2D(tp - pos), tp.z - pos.z, d.caps.npc && Config::Get().anim.climb ? "yes" : "no", shared, g_tiles.size());
 			}
 			g_deep.push_back(std::move(d));
 			return true;
 		}
 
-		// Top surface a creature could stand on at (x, y): skips actors, clutter, debris and non-solid layers. Tree hits
-		// are skipped too, but a trunk or low branches (anything below body height over the ground found) block the cell.
-		bool DeepGround(const Caster& r, float x, float y, float top, float bot, float bodyH, float& out)
+		// Raw sample at (x, y): the top surface anything could stand on (skips actors, clutter, debris, non-solid layers
+		// and trees), plus the lowest tree hit above it. Returns false when there is no ground in range.
+		bool DeepGroundRaw(const Caster& r, float x, float y, float top, float bot, float& a_z, float& a_tree)
 		{
 			Vec       from{ x, y, top };
 			const Vec to{ x, y, bot };
-			float     treeZ = 1e30f;
+			a_tree = 1e30f;
 			for (int n = 0; n < 6; ++n) {
 				Hit k;
 				if (!r.Cast(from, to, k)) {
@@ -1453,14 +1523,11 @@ namespace JumpNav
 				const bool tree = k.layer == L::kTrees;
 				if (!tree && !IsActorHit(k) && Raycast::SolidLayer(k.layer) && k.layer != L::kClutter && k.layer != L::kDebrisSmall &&
 					k.layer != L::kDebrisLarge) {
-					if (treeZ - k.point.z < bodyH) {
-						return false;
-					}
-					out = k.point.z;
+					a_z = k.point.z;
 					return true;
 				}
 				if (tree) {
-					treeZ = (std::min)(treeZ, k.point.z);
+					a_tree = (std::min)(a_tree, k.point.z);
 				}
 				from = k.point - Vec{ 0, 0, 2.0f };
 				if (from.z <= bot) {
@@ -1468,6 +1535,17 @@ namespace JumpNav
 				}
 			}
 			return false;
+		}
+
+		// Ground this NPC can stand on: a trunk or low branches (below body height over the ground) block the spot.
+		bool DeepGround(const Caster& r, float x, float y, float top, float bot, float bodyH, float& out)
+		{
+			float z = 0, tree = 1e30f;
+			if (!DeepGroundRaw(r, x, y, top, bot, z, tree) || tree - z < bodyH) {
+				return false;
+			}
+			out = z;
+			return true;
 		}
 
 		Vec DeepCellPos(const DeepScan& d, int i)
@@ -1502,20 +1580,16 @@ namespace JumpNav
 		// re-plan tries a genuinely different spot instead of the same ledge one cell over.
 		void DeepBan(DeepScan& d, int a_from, int a_to)
 		{
-			const std::uint64_t N = static_cast<std::uint64_t>(d.W) * d.H;
+			auto& shared = g_sharedBans[d.cls];
+			const int fx0 = d.gx0 + a_from % d.W, fy0 = d.gy0 + a_from / d.W;
+			const int tx0 = d.gx0 + a_to % d.W, ty0 = d.gy0 + a_to / d.W;
 			for (int fy = -1; fy <= 1; ++fy) {
 				for (int fx = -1; fx <= 1; ++fx) {
-					const int ax = a_from % d.W + fx, ay = a_from / d.W + fy;
-					if (ax < 0 || ay < 0 || ax >= d.W || ay >= d.H) {
-						continue;
-					}
 					for (int ty = -1; ty <= 1; ++ty) {
 						for (int tx = -1; tx <= 1; ++tx) {
-							const int bx = a_to % d.W + tx, by = a_to / d.W + ty;
-							if (bx < 0 || by < 0 || bx >= d.W || by >= d.H) {
-								continue;
-							}
-							d.bannedJumps.insert(static_cast<std::uint64_t>(ay * d.W + ax) * N + static_cast<std::uint64_t>(by * d.W + bx));
+							const std::uint64_t k = WPair(fx0 + fx, fy0 + fy, tx0 + tx, ty0 + ty);
+							d.bannedJumps.insert(k);
+							shared[k] = g_time + 60.0;
 						}
 					}
 				}
@@ -1722,6 +1796,8 @@ namespace JumpNav
 			if (d.route.size() < 2) {
 				m.deepPauseTarget = d.goalId;
 				m.deepPauseUntil = g_time + cfg.deepScanPause;
+				g_noWay[d.noWayKey] = g_time + cfg.deepScanPause;
+				std::erase_if(g_noWay, [](const auto& kv) { return kv.second < g_time; });
 				Count([](Stats& st) { ++st.routesFailed; });
 				if (cfg.log) {
 					std::string tally;
@@ -1731,8 +1807,8 @@ namespace JumpNav
 						}
 					}
 					logger::info("[{}] DEEPSCAN {:08X} '{}' none: no checked walk/jump/climb way over {}x{} cells (attempts={} badJumps={} badClimbs={} badWalks={} "
-								 "rays={}+{} frames={} jumpRejects:{}) - pausing routes {:.0f}s",
-						Tuning::ModeLabel(), d.id, d.name, d.W, d.H, d.attempts, d.badJumps, d.badClimbs, d.badWalks, d.rays, d.checkRays, d.frames,
+								 "rays={}+{} cachedCells={}/{} frames={} jumpRejects:{}) - pausing routes {:.0f}s",
+						Tuning::ModeLabel(), d.id, d.name, d.W, d.H, d.attempts, d.badJumps, d.badClimbs, d.badWalks, d.rays, d.checkRays, d.cachedCells, d.W * d.H, d.frames,
 						tally.empty() ? " -" : tally, cfg.deepScanPause);
 				}
 				return;
@@ -1763,9 +1839,9 @@ namespace JumpNav
 			Count([](Stats& st) { ++st.routes; });
 			if (cfg.log) {
 				logger::info("[{}] ROUTE {:08X} '{}' why=deepscan {} nodes={} jumps={} climbs={} cost={:.0f} attempts={} badJumps={} badClimbs={} badWalks={} "
-							 "rays={}+{} map={} frames={} expanded={} goalDist={:.0f}",
+							 "rays={}+{} cachedCells={}/{} frames={} expanded={} goalDist={:.0f}",
 					Tuning::ModeLabel(), d.id, d.name, d.reached ? "full" : "partial", g.pts.size(), d.routeJumps, routeClimbs, g.len, d.attempts + 1, d.badJumps,
-					d.badClimbs, d.badWalks, d.rays, d.checkRays, d.reusedMap ? "reused" : "new", d.frames, d.expanded, (d.goal - g.pts.back().p).Length());
+					d.badClimbs, d.badWalks, d.rays, d.checkRays, d.cachedCells, d.W * d.H, d.frames, d.expanded, (d.goal - g.pts.back().p).Length());
 			}
 			RecordDebug(std::move(pts), true, std::format("deep route {} hops {} jumps", g.pts.size() - 1, d.routeJumps));
 			g_glides.push_back(std::move(g));
@@ -1784,18 +1860,28 @@ namespace JumpNav
 				const float wade = WadeMax(d.caps.height);
 				while (d.next < d.h.size() && r.used < cfg.deepScanRays) {
 					const int i = static_cast<int>(d.next++);
-					float     z = 0;
-					if (DeepGround(r, d.ox + (i % d.W + 0.5f) * d.cell, d.oy + (i / d.W + 0.5f) * d.cell, d.zTop, d.zBot, d.caps.height, z) &&
-						z >= d.waterZ - wade) {
+					const int gx = d.gx0 + i % d.W, gy = d.gy0 + i / d.W;
+					float     z = std::numeric_limits<float>::quiet_NaN(), tree = 1e30f;
+					const auto* known = CacheCell(gx, gy, false);
+					if (known && known->top >= d.zTop - 1.0f && (!std::isnan(known->h) ? known->h >= d.zBot : known->bot <= d.zBot + 1.0f)) {
+						z = known->h;
+						tree = known->tree;
+						++d.cachedCells;
+					} else {
+						if (!DeepGroundRaw(r, (gx + 0.5f) * d.cell, (gy + 0.5f) * d.cell, d.zTop, d.zBot, z, tree)) {
+							z = std::numeric_limits<float>::quiet_NaN();
+						}
+						if (auto* w = CacheCell(gx, gy, true)) {
+							*w = { z, tree, d.zTop, d.zBot };
+						}
+					}
+					if (!std::isnan(z) && tree - z >= d.caps.height && z >= d.waterZ - wade) {
 						d.h[i] = z;
 					}
 				}
 				d.rays += r.used;
 				if (d.next < d.h.size()) {
 					return false;
-				}
-				if (!d.reusedMap) {
-					g_deepMap = { g_time, d.ox, d.oy, d.cell, d.zTop, d.zBot, d.W, d.H, d.h };
 				}
 				const int sx = std::clamp(static_cast<int>((d.start.x - d.ox) / d.cell), 0, d.W - 1);
 				const int sy = std::clamp(static_cast<int>((d.start.y - d.oy) / d.cell), 0, d.H - 1);
@@ -1818,7 +1904,6 @@ namespace JumpNav
 				return false;
 			}
 			const float c = d.cell;
-			const int   N = d.W * d.H;
 			const float upPer = c * (std::max)(0.75f, d.caps.steep / 90.0f);  // walkable rise per cell
 			const float downPer = c * 1.5f;
 			const auto& acfg = Config::Get().anim;
@@ -1857,7 +1942,7 @@ namespace JumpNav
 				const int ix = i % d.W, iy = i / d.W;
 				auto      push = [&](int t, float cost, int kind) {  // 0 walk, 1 jump, 2 climb
 					if (d.closed[t] || IsBad(d.id, Key(DeepCellPos(d, t))) ||
-						(kind != 0 && d.bannedJumps.contains(static_cast<std::uint64_t>(i) * static_cast<std::uint64_t>(N) + t))) {
+						(kind != 0 && d.bannedJumps.contains(WPair(d.gx0 + ix, d.gy0 + iy, d.gx0 + t % d.W, d.gy0 + t / d.W)))) {
 						return;
 					}
 					const float ng = d.g[i] + cost;
@@ -2879,6 +2964,9 @@ namespace JumpNav
 		g_glides.clear();
 		g_searches.clear();
 		g_deep.clear();
+		g_tiles.clear();
+		g_sharedBans.clear();
+		g_noWay.clear();
 		g_memo.clear();
 		g_settles.clear();
 		g_raceExcluded.clear();

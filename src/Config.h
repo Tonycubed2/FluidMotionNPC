@@ -75,6 +75,7 @@ namespace Config
 		int   deepScanRays = 400;
 		float deepScanPause = 15.0f;
 		int   deepScanRetries = 8;
+		float deepScanShareSec = 60.0f;
 		float giantUpPerHeight = 1.4f;
 		float giantDistPerHeight = 2.6f;
 		std::string npcStartEvent = "JumpDirectionalStart";
