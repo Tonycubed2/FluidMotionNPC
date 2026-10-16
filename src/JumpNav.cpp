@@ -984,7 +984,22 @@ namespace JumpNav
 				}
 				return false;
 			};
-			return !blocked(p + Vec{ 0, 0, knee }, q + Vec{ 0, 0, knee }) && !blocked(p + Vec{ 0, 0, h * 0.8f }, q + Vec{ 0, 0, h * 0.8f }) && Headroom(r, q, h) && Headroom(r, m, h);
+			if (blocked(p + Vec{ 0, 0, knee }, q + Vec{ 0, 0, knee }) || blocked(p + Vec{ 0, 0, h * 0.8f }, q + Vec{ 0, 0, h * 0.8f }) || !Headroom(r, q, h) ||
+				!Headroom(r, m, h)) {
+				return false;
+			}
+			// The centre line can pass right beside a rock lip that the body still hits (a troll is wide). Check the
+			// edges of the body at knee height too, so the plan jumps or goes around instead of walking into it.
+			const float side = s.caps.radius * 0.7f;
+			if (side > 8.0f) {
+				const Vec sv{ -dy * side, dx * side, 0.0f };
+				for (const Vec& o : { sv, sv * -1.0f }) {
+					if (blocked(p + o + Vec{ 0, 0, knee }, q + o + Vec{ 0, 0, knee })) {
+						return false;
+					}
+				}
+			}
+			return true;
 		}
 
 		bool JumpEdge(const Search& s, const Caster& r, const Vec& p, float dx, float dy, float d, Vec& q)
@@ -1043,6 +1058,14 @@ namespace JumpNav
 			if (!Headroom(r, q, h)) {
 				return "headroomEnd";
 			}
+			if (const float side = s.caps.radius * 0.7f; side > 8.0f) {
+				const Vec sv{ -dy * side, dx * side, 0.0f };
+				for (const Vec& o : { sv, sv * -1.0f }) {
+					if (r.Cast(p + o + Vec{ 0, 0, knee }, q + o + Vec{ 0, 0, knee }, k) && !IsActorHit(k)) {
+						return "sideRay " + who(k) + std::format(" at {:.0f}", (k.point - p).Length());
+					}
+				}
+			}
 			return "headroomMid";
 		}
 
@@ -1084,7 +1107,10 @@ namespace JumpNav
 
 		void Push(Search& s, int a_parent, const Vec& q, float a_cost, bool a_jump, bool a_climb = false, bool a_hang = false, float a_dx = 0, float a_dy = 0)
 		{
-			if (IsBad(s.id, Key(q)) || !s.seen.insert(Key(q)).second) {
+			// Areas marked bad after a blocked route never cover the first steps away from where the actor stands now,
+			// or a search started right next to the obstacle could not take a single step (ROUTEFAIL expanded=1).
+			const bool nearStart = Len2D(q - s.start) < s.caps.radius + 100.0f;
+			if ((!nearStart && IsBad(s.id, Key(q))) || !s.seen.insert(Key(q)).second) {
 				return;
 			}
 			const int idx = static_cast<int>(s.nodes.size());
