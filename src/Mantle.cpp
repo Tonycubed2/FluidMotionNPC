@@ -244,24 +244,34 @@ namespace Mantle
 		if (!PlanClimb(ray, a->GetPosition(), dir, h, a_maxWall, a_air, plan, a_window)) {
 			return false;
 		}
-		// Never climb onto a person: reject a ledge or landing spot inside the player or the actor's combat target
-		// (whatever the rays hit there - shield, weapon, armour - belongs to them, not to the world).
+		// Never climb onto a person or creature: reject a ledge or landing spot inside ANY actor near it - the player,
+		// the target, or another NPC in a crowd pressing against this one (whatever the rays hit there - body, shield,
+		// weapon, armour - belongs to them, not to the world). Corpses count too.
 		auto onActor = [&](RE::Actor* o) {
-			if (!o || o == a || o->IsDead() || !o->Is3DLoaded()) {
+			if (!o || o == a || !o->Is3DLoaded()) {
 				return false;
 			}
 			const V     op = o->GetPosition();
 			const float oh = (std::max)(o->GetHeight(), 100.0f);
+			const float orad = std::clamp(o->GetBoundRadius(), 30.0f, 150.0f) + 40.0f;
 			for (const V& q : { plan.edge, plan.stand }) {
-				if (std::hypot(q.x - op.x, q.y - op.y) < 75.0f && q.z > op.z - 30.0f && q.z < op.z + oh + 30.0f) {
+				if (std::hypot(q.x - op.x, q.y - op.y) < orad && q.z > op.z - 30.0f && q.z < op.z + oh + 30.0f) {
 					return true;
 				}
 			}
 			return false;
 		};
-		RE::NiPointer<RE::Actor> tgt = a->GetActorRuntimeData().currentCombatTarget.get();
-		if (onActor(RE::PlayerCharacter::GetSingleton()) || onActor(tgt.get())) {
+		if (onActor(RE::PlayerCharacter::GetSingleton())) {
 			return false;
+		}
+		if (auto* lists = RE::ProcessLists::GetSingleton()) {
+			const V here = a->GetPosition();
+			for (auto& hnd : lists->highActorHandles) {
+				auto o = hnd.get();
+				if (o && o.get() != a && std::hypot(o->GetPosition().x - here.x, o->GetPosition().y - here.y) < 400.0f && onActor(o.get())) {
+					return false;
+				}
+			}
 		}
 		return Start(a, plan);
 	}
