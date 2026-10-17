@@ -2225,8 +2225,10 @@ namespace JumpNav
 					// In combat, never move it faster than its own AI is asking to run (race full speed made attackers
 					// close in at "super speed"). If its AI has stopped asking (level-gap chase), use 60% of full run.
 					if (actor->IsInCombat()) {
+						// Follow the pace its AI asks for: walking stays walking. Only when its AI asks for nothing at all
+						// (a level-gap chase it gave up on) use 60% of full run so the route still gets somewhere.
 						const float cmd = Locomotion::CommandedSpeed(g.id);
-						mv.run = (std::min)(mv.run, (std::max)(cmd * 1.05f, 0.6f * mv.run));
+						mv.run = (std::min)(mv.run, cmd >= 30.0f ? (std::max)(cmd * 1.05f, 60.0f) : 0.6f * mv.run);
 					}
 					const Vec    wp = g.pts[g.i].p;
 					const Vec    to = wp - cur;
@@ -2798,6 +2800,12 @@ namespace JumpNav
 			}
 
 			if (a_actor->IsInCombat()) {
+				// A melee attacker running at its target on the same level vaults a low obstacle in the straight line
+				// (fence, table, bench) instead of letting the game's path send it the long way round.
+				if (caps.jumps && cfg.vault && cfg.combatVault && perceived && !IsRanged(a_actor) && !a_actor->IsAttacking() &&
+					TryVaultToward(a_actor, caps, combatTgt.get(), m, a_plans)) {
+					return;
+				}
 				if (caps.jumps && cfg.pursuit && perceived && !IsRanged(a_actor) && !navOk) {
 					if (TryReach(a_actor, caps, combatTgt.get(), Trigger::kPursuit, cfg.pursuitStuckSec, cfg.pursuitMinRise, 15.0f, m, a_plans)) {
 						return;

@@ -94,6 +94,7 @@ namespace Config
 		getf("fFollowMinRatio", j.followMinRatio);
 		j.followVault = ini.GetBoolValue("Jump", "bFollowVault", j.followVault);
 		j.vault = ini.GetBoolValue("Jump", "bVault", j.vault);
+		j.combatVault = ini.GetBoolValue("Jump", "bCombatVault", j.combatVault);
 		getf("fVaultMaxFrac", j.vaultMaxFrac);
 		getf("fVaultMaxDz", j.vaultMaxDz);
 		getf("fFollowVaultMinSaving", j.followVaultMinSaving);
