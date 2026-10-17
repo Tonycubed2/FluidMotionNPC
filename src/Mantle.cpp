@@ -26,6 +26,23 @@ namespace Mantle
 		double                                 g_time = 0;
 		double                                 g_nextPrune = 30;
 
+		// Stairs and steps are walked, never climbed. By model name (stairs, steps) when the hit object has one...
+		bool IsStairsRef(RE::TESObjectREFR* a_ref)
+		{
+			if (!a_ref) {
+				return false;
+			}
+			auto* base = a_ref->GetBaseObject();
+			auto* model = base ? base->As<RE::TESModel>() : nullptr;
+			const char* path = model ? model->GetModel() : nullptr;
+			if (!path || !*path) {
+				return false;
+			}
+			std::string lower(path);
+			std::ranges::transform(lower, lower.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+			return lower.find("stair") != std::string::npos || lower.find("steps") != std::string::npos;
+		}
+
 		float Smooth01(float x)
 		{
 			x = std::clamp(x, 0.0f, 1.0f);
@@ -150,6 +167,23 @@ namespace Mantle
 		}
 		if (!found) {
 			return false;
+		}
+		// ...and by shape: a step-sized ledge with another riser right behind it is a staircase (stone steps baked
+		// into terrain or a building have no "stairs" model of their own).
+		if (IsStairsRef(wall.ref) || IsStairsRef(top.ref)) {
+			return false;
+		}
+		if (H <= 75.0f) {
+			for (float ahead : { 30.0f, 55.0f }) {
+				const V      q = o.stand + fwd * ahead;
+				Raycast::Hit g;
+				if (ray.Cast({ q.x, q.y, o.stand.z + 90.0f }, { q.x, q.y, o.stand.z - 20.0f }, g) && !Raycast::IsActorHit(g)) {
+					const float rise = g.point.z - o.stand.z;
+					if (rise >= 10.0f && rise <= 70.0f && g.normal.z >= 0.7f) {
+						return false;  // next step up
+					}
+				}
+			}
 		}
 		o.edge = { wall.point.x, wall.point.y, top.point.z };
 		o.fwd = fwd;

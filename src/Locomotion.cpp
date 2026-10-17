@@ -83,6 +83,7 @@ namespace Locomotion
 			bool          havePos = false, prevGrounded = false, bonesBad = false;
 			V3            pos{}, vel{};
 			float         speedH = 0, driven = 0, cmdSpeed = 0, cmdT = -9.0f;
+			float         slowSince = -1.0f;  // when it last dropped below walking pace (blocked), -1 = moving freely
 			ClimbPose     climbPose;
 			std::vector<RE::NiAVObject*>                              cnodes;
 			std::vector<RE::NiAVObject*>                              jnodes[3];
@@ -766,8 +767,18 @@ namespace Locomotion
 				const bool  busy = JumpNav::InFlight(s.id) || Mantle::Active(s.id) || Api::Claimed(s.id) || Api::ExternalBusy(a_actor);
 				const bool  moving = s.cmdSpeed > 60.0f && now - s.cmdT < 0.2f && g_frame.load() - s.drivenFrame > 2;
 				// in a hurry (combat, fleeing, running) or a follower keeping up with the player
-				tryClimb = c.climb && normal && grounded && !busy && moving && (JumpNav::InHurry(a_actor) || JumpNav::IsFollowingPlayer(a_actor));
-				climbReach = s.speedH < 40.0f ? 75.0f : 48.0f;
+				// Only climb when really blocked: its AI wants to move but it has barely moved for a moment. An NPC running up
+				// stairs keeps its speed (the engine walks it up the steps), so it is never made to climb them.
+				if (s.speedH < 50.0f) {
+					if (s.slowSince < 0.0f) {
+						s.slowSince = now;
+					}
+				} else {
+					s.slowSince = -1.0f;
+				}
+				const bool blocked = s.slowSince >= 0.0f && now - s.slowSince > 0.25f;
+				tryClimb = c.climb && normal && grounded && !busy && moving && blocked && (JumpNav::InHurry(a_actor) || JumpNav::IsFollowingPlayer(a_actor));
+				climbReach = 75.0f;
 				tryHang = c.climb && c.hang && normal && !grounded && cc && !JumpNav::InFlight(s.id) && now - s.airStart > 0.05f &&
 				          now - s.airStart < 1.8f && s.vel.z > -250.0f && moving;
 			}
