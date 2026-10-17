@@ -293,7 +293,9 @@ namespace Locomotion
 				s.cmdSpeed = v;
 				s.cmdT = g_time.load();
 				if (frame - s.drivenFrame <= 2) {
-					v = s.driven;
+					// Never slower than the actor is really moving: a creature whose AI keeps pushing it while a
+					// route slows or turns would otherwise play a slow walk while gliding along ("levitation").
+					v = (std::max)(s.driven, s.speedH);
 				}
 			}
 			static inline REL::Relocation<decltype(thunk)> func;

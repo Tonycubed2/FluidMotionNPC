@@ -2665,8 +2665,25 @@ namespace JumpNav
 			return false;
 		}
 
-		// A follower heading for a target at the same level with a low obstacle (table, bench, fence) in the straight
-		// line between them vaults over it toward the target, whatever route the game's pathfinding picked.
+		// Length of the actor's own (game) path from where it is to a_goal, or -1 when it has none.
+		float VanillaPathLen(RE::Actor* a_actor, const Vec& a_goal)
+		{
+			auto pr = PathProbe::GetPathRef(a_actor);
+			static PathProbe::PathGeometry geo;
+			if (!pr || !pr->path || (pr->state != 4 && pr->state != 0xd) || !PathProbe::ReadPath(pr->path, geo) || geo.total != geo.count || geo.count < 2) {
+				return -1.0f;
+			}
+			float acc = 0;
+			Vec   prev = a_actor->GetPosition();
+			for (std::uint32_t j = static_cast<std::uint32_t>(pr->progress) + 1; j < geo.count; ++j) {
+				acc += prev.GetDistance(geo.nodes[j].pos);
+				prev = geo.nodes[j].pos;
+			}
+			return acc + prev.GetDistance(a_goal);
+		}
+
+		// A follower (or, with bCombatVault, a melee attacker) heading for a target at the same level with a low
+		// obstacle (table, bench, fence) in the straight line between them vaults over it toward the target.
 		bool TryVaultToward(RE::Actor* a_actor, const Caps& a_caps, RE::Actor* a_target, Memo& a_memo, int& a_plans)
 		{
 			const auto& cfg = Config::Get().jump;
@@ -2693,6 +2710,15 @@ namespace JumpNav
 				return false;  // nothing in the way at knee height
 			}
 			const float wall = Len2D(lo.point - pos);
+			// In combat, only when walking around is clearly longer than going over (a haystack with a short way round
+			// is walked around). With no usable game path at all, vaulting is the way.
+			if (a_actor->IsInCombat()) {
+				const float around = VanillaPathLen(a_actor, a_target->GetPosition());
+				if (around >= 0.0f && (around - dh < cfg.combatVaultMinSaving || around < cfg.combatVaultMinRatio * dh)) {
+					a_memo.vaultNext = g_time + 1.5;
+					return false;
+				}
+			}
 			const Vec   over = pos + Vec{ 0, 0, h * cfg.vaultMaxFrac + 10.0f };
 			Hit         hi;
 			if (r.Cast(over, over + dir * (wall + 70.0f), hi) && !IsActorHit(hi)) {
@@ -2714,6 +2740,9 @@ namespace JumpNav
 					}
 					Launch(a_actor, a_caps, plan, Trigger::kShortcut, 0.0f);
 					a_memo.cooldownUntil = g_time + cfg.cooldown;
+					if (a_actor->IsInCombat()) {
+						a_memo.vaultNext = g_time + 4.0;  // no hopping over everything in a row
+					}
 					return true;
 				}
 				first = first == Reject::kOk ? (rj == Reject::kOk ? Reject::kLanding : rj) : first;

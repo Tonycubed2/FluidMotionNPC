@@ -48,6 +48,8 @@ namespace Config
 		bool  followVault = true;
 		bool  vault = true;
 		bool  combatVault = true;
+		float combatVaultMinSaving = 150.0f;
+		float combatVaultMinRatio = 1.35f;
 		float vaultMaxFrac = 0.6f;
 		float vaultMaxDz = 40.0f;
 		float followVaultMinSaving = 95.0f;
