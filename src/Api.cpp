@@ -55,10 +55,33 @@ namespace Api
 		return it != g_actors.end() && Clock::now() < it->second.turnUntil ? it->second.turnDeg : 0.0f;
 	}
 
+	namespace
+	{
+		// Ride Along (Nexus 194579): seats followers on the player's horse and pins them there every frame. While an
+		// actor is in its passenger faction (boarding, riding, driving, and ~2 s after getting off) it is not walking,
+		// so FluidMotionNPC must not climb, jump or route it (that showed as "climbing gestures" on the passenger).
+		RE::TESFaction* RideAlongPassengerFaction()
+		{
+			static std::atomic<int>          state{ 0 };  // 0 = not looked up yet, 1 = done
+			static std::atomic<RE::TESFaction*> faction{ nullptr };
+			if (state.load(std::memory_order_acquire) == 0) {
+				if (auto* dh = RE::TESDataHandler::GetSingleton(); dh && dh->LookupModByName("RideAlong.esp")) {
+					faction.store(dh->LookupForm<RE::TESFaction>(0x802, "RideAlong.esp"), std::memory_order_release);
+					logger::info("Ride Along detected: its passengers are left alone (faction {})", faction.load() ? "found" : "NOT found");
+				}
+				state.store(1, std::memory_order_release);
+			}
+			return faction.load(std::memory_order_acquire);
+		}
+	}
+
 	bool ExternalBusy(RE::Actor* a_actor)
 	{
 		if (!a_actor || !a_actor->Is3DLoaded()) {
 			return false;
+		}
+		if (auto* f = RideAlongPassengerFaction(); f && a_actor->IsInFaction(f)) {
+			return true;
 		}
 		// Set by SkyParkour's behaviour graph while a parkour move / landing roll / slide plays (Follower Parkour uses
 		// the same graph on NPCs). Absent variables read as false, so this costs nothing without those mods.
