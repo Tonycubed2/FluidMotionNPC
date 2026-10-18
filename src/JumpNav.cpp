@@ -25,8 +25,8 @@ namespace JumpNav
 		constexpr int   kPlansPerFrame = 2;
 		constexpr float kPostLandCheck = 0.4f;
 		constexpr float kSettleSec = 0.35f;
-		constexpr float kJumpWatchSec = 2.5f;
-		constexpr float kRelandAfter = 1.0f;
+		constexpr float kJumpWatchSec = 3.0f;
+		constexpr float kRelandAfter = 2.0f;  // only a truly stuck jump state: the normal landing animation is over by then
 		constexpr float kFollowStill = 0.5f;   // a follower that moved less than kStillDist for this long is stuck
 		constexpr float kStillDist = 40.0f;
 
@@ -810,7 +810,8 @@ namespace JumpNav
 				}
 				// Sometimes the behaviour graph ignores the land event and stays in its jump state. It then ignores
 				// the walk events too and the NPC skates along on its run speed, or keeps hopping in place. ONE retry,
-				// when a second after touchdown (landing animation over) it is still in the jump state, moving or not.
+				// when two seconds after touchdown it is still in the jump state, moving or not. (At one second the normal
+				// landing animation could still be playing, and the retry replayed it: "lands three times".)
 				// Repeated re-sends restarted the landing animation (head-bob "pecking"), so never more than one.
 				auto* cc = actor->GetCharController();
 				if (it->landNext > 0 && g_time >= it->landNext && actor->IsInJumpState() && cc && cc->context.currentState == RE::hkpCharacterStateType::kOnGround) {
@@ -2531,8 +2532,10 @@ namespace JumpNav
 				Searching(a_actor->GetFormID()) || FindGlide(a_actor->GetFormID()) || DeepScanning(a_actor->GetFormID())) {
 				return;
 			}
-			if (a_memo.deepPauseTarget == a_goal->GetFormID() && g_time < a_memo.deepPauseUntil) {
-				TryTrailRoute(a_actor, a_caps, a_goal, a_memo);  // the deep scan found no way: follow the player's trail
+			// The deep scan found no way to this target a moment ago: try the player's trail first. If that isn't usable,
+			// carry on with the normal route search as before (v24 behaviour) - only another deep scan is skipped.
+			const bool deepPaused = a_memo.deepPauseTarget == a_goal->GetFormID() && g_time < a_memo.deepPauseUntil;
+			if (deepPaused && TryTrailRoute(a_actor, a_caps, a_goal, a_memo)) {
 				return;
 			}
 			const bool follower = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
@@ -2575,7 +2578,7 @@ namespace JumpNav
 					return;
 				}
 			}
-			if (cfg.deepScan && stuck && a_memo.fails >= cfg.deepScanAfter && a_memo.failTarget == a_goal->GetFormID() &&
+			if (cfg.deepScan && !deepPaused && stuck && a_memo.fails >= cfg.deepScanAfter && a_memo.failTarget == a_goal->GetFormID() &&
 				StartDeepScan(a_actor, a_caps, a_goal, a_gap, a_memo)) {
 				a_memo.forceStuck = false;
 				return;
