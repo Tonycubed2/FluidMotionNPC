@@ -219,6 +219,8 @@ namespace JumpNav
 			double     deepPauseUntil = 0;
 			double     deepNext = 0;
 			double     trailNext = 0;  // next time a player-trail route may be tried
+			double     strandedSince = 0;  // v29: standing still in combat, target far, the game's AI has no path
+			bool       stranded = false;
 		};
 
 		struct Settle
@@ -943,6 +945,7 @@ namespace JumpNav
 			float           idleT = 0;        // how long the actor's AI has not wanted to move
 			Vec             blockPt;          // where the last walk-block ray hit (ground height)
 			bool            haveBlockPt = false;
+			int             jumpRetries = 0;  // v29: step-back retries at the current jump node
 		};
 
 		std::vector<Search> g_searches;
@@ -2145,6 +2148,12 @@ namespace JumpNav
 			const bool             voluntary = why.starts_with("calm") || why == "aistop" || why == "busy" || why == "parkour" || why == "claimed";
 			if (a_done) {
 				m.fails = 0;
+				m.stranded = false;
+				m.strandedSince = 0;
+				// v29: arrived in combat - make its AI re-evaluate now instead of standing a moment before attacking.
+				if (auto p = g.handle.get(); p.get() && p->IsInCombat()) {
+					p->EvaluatePackage(false, false);
+				}
 			} else if (!voluntary && why != "lost" && why != "goalmoved" && why != "arrived") {
 				NoteFail(m, g.goalId);
 			}
@@ -2195,6 +2204,7 @@ namespace JumpNav
 					drop = "busy";     // attacking: its own animation moves it, never slide it
 				} else if (actor->IsInCombat() && g.holdUntil <= 0 && !std::ranges::any_of(g_flights, [&](const Flight& f) { return f.id == g.id; }) &&
 						   !Mantle::Active(g.id) && !LevelGap(actor, RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId), g.caps.height) &&
+						   !g_memo[g.id].stranded &&
 						   (g.idleT = WantsToMove(actor) ? 0.0f : g.idleT + a_dt) > 0.4f) {
 					// In combat on the same level, its AI stopped trying to move (roar, cast, decided to hold). Followers
 					// and level-gap chases are exempt: there the game's AI often gives up while the route is still valid.
@@ -2286,6 +2296,33 @@ namespace JumpNav
 						++it;
 						continue;
 					}
+					if (r != Reject::kOk && (r == Reject::kSweep || r == Reject::kProfile || r == Reject::kRise) && g.jumpRetries < 2) {
+						// v29: usually it arrived pressed against the fence/rock, too close for any arc to clear it
+						// (planned from a take-off spot a little further back). Step back along the way it came and
+						// try again, instead of dropping the route and leaving it to the game's (long) way round.
+						Vec back = g.pts[g.i].p - cur;
+						back.z = 0.0f;
+						const float bl = Len2D(back);
+						Caster      br;
+						Hit         bh;
+						if (bl > 1.0f && br.Init(actor)) {
+							const float dist = 50.0f + 25.0f * g.jumpRetries;
+							const Vec   bp = cur - back * (dist / bl);
+							const float kz = (std::max)(35.0f, g.caps.height * 0.35f);
+							const bool  clear = !br.Cast(cur + Vec{ 0, 0, kz }, bp + Vec{ 0, 0, kz }, bh) || IsActorHit(bh);
+							if (clear && br.Cast(bp + Vec{ 0, 0, 40.0f }, bp - Vec{ 0, 0, 40.0f }, bh) && !IsActorHit(bh) && std::fabs(bh.point.z - cur.z) < 20.0f) {
+								++g.jumpRetries;
+								g.pts.insert(g.pts.begin() + static_cast<std::ptrdiff_t>(g.i), Pt{ bh.point, false, false, false, 0.0f, 0.0f });
+								g.wpIdx = 0;
+								if (cfg.log) {
+									logger::info("[{}] ROUTERETRY {:08X} '{}' jump {} from here - stepping back {:.0f}u to try again ({}/2)", Tuning::ModeLabel(), g.id,
+										g.name, RejectName(r), dist, g.jumpRetries);
+								}
+								++it;
+								continue;
+							}
+						}
+					}
 					if (r != Reject::kOk) {
 						CountReject(r);
 						RecordDebug({ cur, g.pts[g.i].p }, false, std::format("route: {}", RejectName(r)));
@@ -2296,6 +2333,7 @@ namespace JumpNav
 					}
 					Launch(actor, g.caps, plan, Trigger::kRoute, 0.0f);
 					g.climbWait = 0;
+					g.jumpRetries = 0;
 					++g.i;
 				} else {
 					Motion mv = RaceMotion(actor);
@@ -2605,8 +2643,31 @@ namespace JumpNav
 			}
 			Vec rv;
 			a_actor->GetLinearVelocity(rv);
+			// v29: stranded - in combat, standing still, target far away and the game's AI has no path to it (e.g. on top
+			// of a rock it climbed). Its AI then stops asking to move, which used to count as "standing still on purpose",
+			// so it waited up there until the target came close. After 2s that counts as stuck.
+			bool aiPathless = false;
+			if (a_actor->IsInCombat() && !follower && Len2D(rv) < 40.0f && dh > 500.0f) {
+				auto pr = PathProbe::GetPathRef(a_actor);
+				static PathProbe::PathGeometry sgeo;
+				aiPathless = !pr || !pr->path || (pr->state != 4 && pr->state != 0xd) || !PathProbe::ReadPath(pr->path, sgeo) || sgeo.total != sgeo.count ||
+				             sgeo.count < 2;
+			}
+			if (!aiPathless) {
+				a_memo.strandedSince = 0;
+				a_memo.stranded = false;
+			} else if (a_memo.strandedSince == 0) {
+				a_memo.strandedSince = g_time;
+			} else if (!a_memo.stranded && g_time - a_memo.strandedSince >= 2.0) {
+				a_memo.stranded = true;
+				a_memo.forceStuck = true;
+				if (cfg.log) {
+					logger::info("[{}] STRANDED {:08X} '{}' no game path to target {:.0f}u away - routing it down/over", Tuning::ModeLabel(), a_actor->GetFormID(),
+						a_actor->GetName(), dh);
+				}
+			}
 			// Standing still on purpose (roaring, posturing, casting) is not being stuck.
-			if ((!follower && Len2D(rv) > 100.0f) || !WantsToMove(a_actor)) {
+			if (!a_memo.stranded && ((!follower && Len2D(rv) > 100.0f) || !WantsToMove(a_actor))) {
 				a_memo.rBestTime = g_time;
 			}
 			const bool stuck = a_memo.forceStuck || mismatch || g_time - a_memo.rBestTime >= (follower ? cfg.followStuckSec : cfg.routeStuckSec);
