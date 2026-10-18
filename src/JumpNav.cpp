@@ -950,6 +950,8 @@ namespace JumpNav
 			bool            haveBlockPt = false;
 			int             jumpRetries = 0;  // v29: step-back retries at the current jump node
 			float           unseen = 0;       // v30: how long the target has been out of its perception
+			Vec             lastSeen;         // v30: target position the last time it was perceived
+			bool            haveSeen = false;
 		};
 
 		std::vector<Search> g_searches;
@@ -2189,6 +2191,39 @@ namespace JumpNav
 			return true;
 		}
 
+		// v30: in combat, losing sight of the target does not end the route. The NPC carries on to the last place it
+		// knew the target was (the route's end) and only gives up when it gets there and still can't detect it, or after
+		// 12s unseen. Before, one zero detection reading (NPC turned away to step back, a fence post in the line of
+		// sight) ended the route and handed it to the game's long way round: 10 of 25 routes in Macsut's v29 log.
+		bool LostTarget(Glide& g, RE::Actor* a_actor)
+		{
+			auto* t = RE::TESForm::LookupByID<RE::Actor>(g.goalId);
+			if (!t) {
+				return true;
+			}
+			if (Perceives(a_actor, t)) {
+				if (g.unseen > 0.0f && Config::Get().jump.log) {
+					logger::info("[{}] TARGETSEEN {:08X} '{}' sees its target again after {:.1f}s", Tuning::ModeLabel(), g.id, g.name, g.unseen);
+				}
+				g.unseen = 0.0f;
+				g.lastSeen = t->GetPosition();
+				g.haveSeen = true;
+				return false;
+			}
+			if (g.unseen == 0.0f && Config::Get().jump.log) {
+				const Vec spot = g.haveSeen ? g.lastSeen : g.goal;
+				logger::info("[{}] TARGETUNSEEN {:08X} '{}' can't detect its target - heading for its last known spot ({:.0f}u away)", Tuning::ModeLabel(), g.id,
+					g.name, Len2D(spot - a_actor->GetPosition()));
+			}
+			g.unseen += 0.5f;
+			if (g.unseen >= 12.0f) {
+				return true;
+			}
+			const Vec  end = g.pts.empty() ? g.goal : g.pts.back().p;
+			const bool atSpot = Len2D(end - a_actor->GetPosition()) < 150.0f;
+			return atSpot && g.unseen >= 1.0f;
+		}
+
 		void UpdateGlides(float a_dt)
 		{
 			const auto& cfg = Config::Get().jump;
@@ -2215,18 +2250,14 @@ namespace JumpNav
 					drop = "aistop";
 				} else if (g_time > g.until) {
 					drop = "timeout";
-				} else if (actor->IsInCombat() && g_time >= g.seeNext &&
-						   (g.seeNext = g_time + 0.5, (g.unseen = Perceives(actor, RE::TESForm::LookupByID<RE::Actor>(g.goalId)) ? 0.0f : g.unseen + 0.5f) >= 2.0f)) {
-					// Target invisible or undetected for 2s in a row: stop homing in on it. (v30: was one failed check.
-					// Detection blips to zero for a moment when the NPC turns away or a fence post is in the way - that
-					// ended 10 of 25 routes in Macsut's v29 log, mostly right after a step-back retry at the fence.)
+				} else if (actor->IsInCombat() && g_time >= g.seeNext && (g.seeNext = g_time + 0.5, LostTarget(g, actor))) {
 					drop = "lost";
 				} else if (!actor->IsInCombat() && !FollowingPlayer(actor)) {
 					drop = "calm";
 				} else if (!actor->IsInCombat() && Len2D(RE::PlayerCharacter::GetSingleton()->GetPosition() - actor->GetPosition()) < 0.6f * cfg.followRouteMin) {
 					drop = "arrived";
 				} else if (auto* goal = RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId);
-						   !goal || goal->GetPosition().GetDistance(g.goal) > 800.0f) {
+						   !goal || (g.unseen <= 0.0f && goal->GetPosition().GetDistance(g.goal) > 800.0f)) {
 					drop = "goalmoved";
 				}
 				if (drop) {
