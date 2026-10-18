@@ -763,7 +763,8 @@ namespace Locomotion
 
 				const auto* st = a_actor->AsActorState();
 				const bool  normal = !a_actor->IsDead() && !a_actor->IsInRagdollState() && !a_actor->IsInKillMove() && !a_actor->IsOnMount() && st &&
-				                    !st->IsFlying() && !st->IsSwimming() && !st->IsBleedingOut() && st->GetSitSleepState() == RE::SIT_SLEEP_STATE::kNormal;
+				                    !st->IsFlying() && !st->IsSwimming() && !st->IsBleedingOut() && st->GetSitSleepState() == RE::SIT_SLEEP_STATE::kNormal &&
+				                    !JumpNav::IsAquatic(a_actor);
 				const bool  busy = JumpNav::InFlight(s.id) || Mantle::Active(s.id) || Api::Claimed(s.id) || Api::ExternalBusy(a_actor);
 				const bool  moving = s.cmdSpeed > 60.0f && now - s.cmdT < 0.2f && g_frame.load() - s.drivenFrame > 2;
 				// in a hurry (combat, fleeing, running) or a follower keeping up with the player

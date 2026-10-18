@@ -94,6 +94,9 @@ namespace JumpNav
 				st->GetKnockState() != RE::KNOCK_STATE_ENUM::kNormal) {
 				return false;
 			}
+			if (IsAquatic(a_actor)) {
+				return false;
+			}
 			auto* race = a_actor->GetRace();
 			// Horses are managed by horse/follower mods (Immersive Horses etc.) and their graph doesn't take the
 			// NPC move events, so moving them by hand glides. Never touch them.

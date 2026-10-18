@@ -2,6 +2,7 @@
 #include "Api.h"
 #include "ClimbClip.h"
 #include "Locomotion.h"
+#include "JumpNav.h"
 #include "Tuning.h"
 
 namespace Mantle
@@ -218,7 +219,7 @@ namespace Mantle
 			return false;
 		}
 		auto* race = a->GetRace();
-		if (!race || a->GetHeight() >= Config::Get().jump.giantHeight) {
+		if (!race || a->GetHeight() >= Config::Get().jump.giantHeight || JumpNav::IsAquatic(a)) {
 			return false;
 		}
 		if (auto it = cache.find(race); it != cache.end()) {
