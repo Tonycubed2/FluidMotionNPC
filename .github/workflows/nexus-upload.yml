@@ -6,7 +6,8 @@ name: Upload to Nexus Mods
 #
 # Needs, in the "nexus" environment (Settings -> Environments -> nexus):
 #   secret   NEXUSMODS_API_KEY  - personal API key from nexusmods.com/settings/api-keys
-#   variable NEXUSMODS_FILE_ID  - File ID of the main file (Files tab -> API Info)
+#   variable NEXUSMODS_FILE_ID  - "File ID" of the main file (Files tab -> Advanced -> API), 8170245
+#   variable NEXUSMODS_MOD_ID   - optional, "Unique Mod ID" (same dialog); default 7318624467660
 
 on:
   workflow_dispatch:
@@ -19,9 +20,9 @@ on:
         required: false
         default: ""
       file_id:
-        description: "Nexus File ID override (optional; default = NEXUSMODS_FILE_ID variable)"
+        description: "Nexus File ID of the main file (Files tab -> Advanced -> API -> File ID)"
         required: false
-        default: ""
+        default: "8170245"
       display_name:
         description: "File name shown on Nexus"
         required: false
@@ -75,20 +76,9 @@ jobs:
           cd ..
           unzip -l FluidMotionNPC.zip
 
-      - name: Look up the internal mod id (needed for the changelog)
-        id: modid
-        if: ${{ inputs.changelog != '' }}
-        env:
-          KEY: ${{ secrets.NEXUSMODS_API_KEY }}
-        run: |
-          body=$(curl -sS -H "apikey: $KEY" -H "Accept: application/json" "https://api.nexusmods.com/v3/games/skyrimspecialedition/mods/195276")
-          id=$(echo "$body" | jq -r '.data.id // .id // empty')
-          if [ -z "$id" ]; then echo "::warning::Could not look up the mod id; uploading without the changelog"; fi
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-
       - name: Format changelog
         id: log
-        if: ${{ inputs.changelog != '' && steps.modid.outputs.id != '' }}
+        if: ${{ inputs.changelog != '' }}
         env:
           TEXT: ${{ inputs.changelog }}
         run: |
@@ -106,6 +96,6 @@ jobs:
           filename: FluidMotionNPC.zip
           display_name: ${{ inputs.display_name }}
           version: ${{ inputs.version }}
-          mod_id: ${{ steps.modid.outputs.id }}
+          mod_id: ${{ vars.NEXUSMODS_MOD_ID || '7318624467660' }}
           changelog: ${{ steps.log.outputs.text }}
           update_mod_version: true
