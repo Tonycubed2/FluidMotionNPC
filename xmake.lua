@@ -1,6 +1,6 @@
 set_xmakever("3.0.0")
 set_project("FluidMotionNPC")
-set_version("32.0.0")
+set_version("33.0.0")
 set_arch("x64")
 set_languages("c++23")
 set_warnings("allextra")

@@ -2187,7 +2187,8 @@ namespace JumpNav
 				(Len2D(gl->GetPosition() - ptr->GetPosition()) > g.gap + 60.0f || gl->GetPosition().z - ptr->GetPosition().z > Config::Get().jump.meleeRise * g.caps.height)) {
 				m.forceStuck = true;
 				// v28: back off after repeated failures (was a new search every ~0.6s: stuck -> sweep -> stuck ...)
-				m.routeNext = g_time + (a_done ? 0.05 : (std::min)(0.6 + 0.6 * m.fails, 3.0));
+				// (combat only: followers keep the quick v8 retry so they don't fall behind)
+				m.routeNext = g_time + (a_done ? 0.05 : (ptr->IsInCombat() ? (std::min)(0.6 + 0.6 * m.fails, 3.0) : 0.6));
 			}
 			if (Config::Get().jump.log) {
 				auto  ptr = g.handle.get();
@@ -2730,7 +2731,7 @@ namespace JumpNav
 				}
 			}
 			// Standing still on purpose (roaring, posturing, casting) is not being stuck.
-			if (!a_memo.stranded && ((!follower && Len2D(rv) > 100.0f) || !WantsToMove(a_actor))) {
+			if (!a_memo.stranded && !follower && (Len2D(rv) > 100.0f || !WantsToMove(a_actor))) {
 				a_memo.rBestTime = g_time;
 			}
 			const bool stuck = a_memo.forceStuck || mismatch || g_time - a_memo.rBestTime >= (follower ? cfg.followStuckSec : cfg.routeStuckSec);
@@ -3171,7 +3172,12 @@ namespace JumpNav
 					a_actor->GetFormID(), n ? n : "", playerDist, followerClose, Locomotion::CommandedSpeed(a_actor->GetFormID()), WantsToMove(a_actor), stillFor,
 					caps.jumps);
 			}
-			if (!WantsToMove(a_actor) && !levelGap) {
+			// v32: a follower far behind the player whose AI has stopped moving is not idling on purpose - the game found
+			// no path to the player (wall, dome, ledge) and gave up. v9 added this gate for roaring trolls and it also
+			// switched followers off exactly when they needed help (laobaobei's v29 log: wantsMove=false at 350-1600u
+			// most of the time). v8 had no gate, which is why followers kept up better there.
+			const bool lostFollower = following && !a_actor->IsInCombat() && playerDist > cfg.followRouteMin;
+			if (!WantsToMove(a_actor) && !levelGap && !lostFollower) {
 				m.stillT = g_time;
 				m.rBestTime = g_time;
 				m.bestTime = g_time;
