@@ -22,6 +22,13 @@ namespace Mantle
 			float h0 = 0, want = 0, t = 0, tail = -1.0f, tailLen = 0.35f, kz = 1.0f, Ta = 0.1f;
 		};
 		std::vector<Climb>                     g_climbs;
+		struct After
+		{
+			RE::FormID id;
+			V          stand;
+			double     at;
+		};
+		std::vector<After> g_after;  // v28: 1.5s after a climb, log whether the NPC stayed up
 		std::unordered_map<RE::FormID, double> g_cool;
 		double                                 g_time = 0;
 		double                                 g_nextPrune = 30;
@@ -160,6 +167,17 @@ namespace Mantle
 			}
 			if (!Raycast::IsActorHit(tmp)) {
 				standZ = tmp.point.z;
+				// v28: the top must be something to stand on, not a steep slope or a thin lip. Steeper than ~45
+				// degrees, or no ground a little further in, and the NPC slid straight back down after the climb.
+				if (tmp.normal.z < 0.7f) {
+					continue;
+				}
+				const V      in = s + fwd * 16.0f;
+				Raycast::Hit g2;
+				if (!ray.Cast({ in.x, in.y, standZ + 40.0f }, { in.x, in.y, standZ - 20.0f }, g2) || Raycast::IsActorHit(g2) ||
+					g2.point.z < standZ - 12.0f || g2.normal.z < 0.6f) {
+					continue;
+				}
 			}
 			o.stand = { s.x, s.y, standZ };
 			found = true;
@@ -322,6 +340,19 @@ namespace Mantle
 			std::erase_if(g_cool, [&](const auto& kv) { return kv.second < g_time; });
 		}
 		const auto& cfg = Config::Get().anim;
+		for (auto ai = g_after.begin(); ai != g_after.end();) {
+			if (g_time < ai->at) {
+				++ai;
+				continue;
+			}
+			if (auto* a = RE::TESForm::LookupByID<RE::Actor>(ai->id); a && a->Is3DLoaded() && Config::Get().jump.log) {
+				const V    p = a->GetPosition();
+				const bool fell = p.z < ai->stand.z - 40.0f;
+				logger::info("CLIMBCHECK {:08X} 1.5s after climb: dz={:+.0f} moved={:.0f} -> {}", ai->id, p.z - ai->stand.z,
+					std::hypot(p.x - ai->stand.x, p.y - ai->stand.y), fell ? "FELL BACK DOWN" : "stayed up");
+			}
+			ai = g_after.erase(ai);
+		}
 		for (auto it = g_climbs.begin(); it != g_climbs.end();) {
 			auto& c = *it;
 			auto  ptr = c.handle.get();
@@ -355,6 +386,7 @@ namespace Mantle
 			}
 			if (c.t >= Ta + Tc) {
 				a->SetPosition(c.O0 + ToWorld(c.want, clip->frames.back().root, c.kz) + c.D, true);
+				g_after.push_back({ c.id, c.O0 + ToWorld(c.want, clip->frames.back().root, c.kz) + c.D, g_time + 1.5 });
 				a->SetHeading(c.want);
 				End(c, a);
 				c.tail = 0.0f;

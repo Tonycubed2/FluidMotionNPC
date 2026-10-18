@@ -234,6 +234,7 @@ namespace JumpNav
 		std::vector<Flight>                   g_flights;
 		std::unordered_map<RE::FormID, Memo>  g_memo;
 		double                                g_time = 0;
+		int                                   g_planRays = 0;  // rays cast by the jump planner (v28 frame budget)
 		double                                g_nextRefresh = 0;
 		double                                g_nextPrune = 30;
 		double                                g_nextStatsLog = 60;
@@ -361,6 +362,11 @@ namespace JumpNav
 			if (!ray.Init(a_actor)) {
 				return Reject::kNoWorld;
 			}
+			struct Tally
+			{
+				const Caster& c;
+				~Tally() { g_planRays += c.used; }
+			} tally{ ray };
 
 			Hit hit;
 			if (!ray.Cast(a_end + Vec{ 0, 0, 60 }, a_end - Vec{ 0, 0, 120 }, hit)) {
@@ -814,12 +820,19 @@ namespace JumpNav
 				// landing animation could still be playing, and the retry replayed it: "lands three times".)
 				// Repeated re-sends restarted the landing animation (head-bob "pecking"), so never more than one.
 				auto* cc = actor->GetCharController();
-				if (it->landNext > 0 && g_time >= it->landNext && actor->IsInJumpState() && cc && cc->context.currentState == RE::hkpCharacterStateType::kOnGround) {
+				// v28: and only when it is actually skating (moving over the ground while the graph is in its jump state).
+				// Standing still in the jump state looks normal and the resend just replayed the landing animation.
+				Vec lv;
+				actor->GetLinearVelocity(lv);
+				const bool skating = Len2D(lv) > 60.0f;
+				if (it->landNext > 0 && g_time >= it->landNext && skating && actor->IsInJumpState() && cc &&
+					cc->context.currentState == RE::hkpCharacterStateType::kOnGround) {
 					it->landNext = 0;  // never again for this landing
 					bool anim = false;
 					SendEvent(actor, it->npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
 					if (cfg.log) {
-						logger::info("[{}] RELAND {:08X} graph still in jump state after landing (accepted={})", Tuning::ModeLabel(), it->id, anim);
+						logger::info("[{}] RELAND {:08X} graph still in jump state and skating at {:.0f} after landing (accepted={})", Tuning::ModeLabel(), it->id,
+							Len2D(lv), anim);
 					}
 				}
 				if (g_time > it->until) {
@@ -852,11 +865,11 @@ namespace JumpNav
 				if (!actor || !actor->Is3DLoaded()) {
 					continue;
 				}
+				// v28: log only. This used to re-send the land event 0.4s after touchdown whenever the graph still
+				// reported its jump state - which it does during every normal landing animation, so every landing was
+				// restarted once ("lands twice, the second time while already standing"). The one real recovery is
+				// RELAND in UpdateSettles.
 				const bool stuck = actor->IsInJumpState();
-				if (stuck) {
-					bool anim = false;
-					SendEvent(actor, m.last.npc ? cfg.npcLandEvent : cfg.creatureLandEvent, anim);
-				}
 				std::string pathInfo;
 				if (m.last.trigger == Trigger::kShortcut) {
 					if (auto pr = PathProbe::GetPathRef(actor)) {
@@ -1363,8 +1376,17 @@ namespace JumpNav
 			std::uint64_t   noWayKey = 0;
 			std::vector<Pt> route;                          // the checked route, ready to drive
 			int             routeJumps = 0;
+			// v28: route check state, carried over frames
+			bool             cBegun = false;
+			std::vector<int> chain;
+			std::size_t      ck = 1, cPair = 0;
+			Vec              cCur;
+			int              cSince = 0;
+			std::vector<Vec> cTake, cLand;
+			int              cWhy[8]{};
 		};
 		std::vector<DeepScan> g_deep;
+		std::size_t           g_deepRr = 0;
 
 		// ---- Shared map: ground heights on a world-aligned grid, stored in 16x16-cell tiles that every NPC reads and adds
 		// to. A scan only casts rays for cells nobody has measured in the last fDeepScanShareSec seconds, so NPCs moving
@@ -1602,30 +1624,53 @@ namespace JumpNav
 		}
 
 		// Checks the planned chain of cells with the precise tests and builds the drivable route. On a failing step or
-		// jump, takes it out of the map (walk: cell blocked; jump: that take-off->landing pair banned) and returns false.
-		bool DeepCheckRoute(DeepScan& d, RE::Actor* a_actor)
+		// jump, takes it out of the map (walk: cell blocked; jump: that take-off->landing pair banned).
+		// v28: resumable. Works through the chain for at most iDeepScanRays rays per frame (jump-planner rays included)
+		// and continues next frame; before, a whole route with several jumps (up to 16 jump plans each) was checked
+		// in one frame, which showed up as stutter. Returns 1 = route ready, -1 = failed, 0 = not finished yet.
+		int DeepCheckRoute(DeepScan& d, RE::Actor* a_actor)
 		{
 			const auto& cfg = Config::Get().jump;
-			std::vector<int> chain;
-			for (int i = d.end; i >= 0; i = d.parent[i]) {
-				chain.push_back(i);
+			if (!d.cBegun) {
+				d.chain.clear();
+				for (int i = d.end; i >= 0; i = d.parent[i]) {
+					d.chain.push_back(i);
+				}
+				std::ranges::reverse(d.chain);
+				d.route.clear();
+				d.routeJumps = 0;
+				d.cCur = a_actor->GetPosition();
+				d.route.push_back({ d.cCur, false, false, false, 0.0f, 0.0f });
+				d.cSince = 0;
+				d.ck = 1;
+				d.cTake.clear();
+				d.cLand.clear();
+				d.cPair = 0;
+				std::ranges::fill(d.cWhy, 0);
+				d.cBegun = true;
 			}
-			std::ranges::reverse(chain);
 			Caster r;
 			if (!r.Init(a_actor)) {
-				return false;
+				return -1;
 			}
 			Search walk;  // only for WalkEdge's caps / water / ground cache
 			walk.caps = d.caps;
 			walk.waterZ = d.waterZ;
-			auto* goalRef = RE::TESForm::LookupByID<RE::TESObjectREFR>(d.goalId);
-
-			d.route.clear();
-			d.routeJumps = 0;
-			Vec cur = a_actor->GetPosition();
-			d.route.push_back({ cur, false, false, false, 0.0f, 0.0f });
-			int sinceKept = 0;
-			for (std::size_t k = 1; k < chain.size(); ++k) {
+			auto*       goalRef = RE::TESForm::LookupByID<RE::TESObjectREFR>(d.goalId);
+			const auto& chain = d.chain;
+			Vec&        cur = d.cCur;
+			int&        sinceKept = d.cSince;
+			const int   planStart = g_planRays;
+			auto        spent = [&] { return r.used + (g_planRays - planStart); };
+			auto        out = [&](int a_res) {
+                d.checkRays += spent();
+                return a_res;
+			};
+			for (; d.ck < chain.size(); ++d.ck) {
+				if (spent() >= cfg.deepScanRays) {
+					return out(0);
+				}
+				const std::size_t k = d.ck;
 				const int i = chain[k];
 				const Vec cp = DeepCellPos(d, i);
 				if (d.climb[i]) {
@@ -1657,8 +1702,6 @@ namespace JumpNav
 							break;
 						}
 					}
-					d.checkRays += r.used;
-					r.used = 0;
 					if (!ok) {
 						DeepBan(d, chain[k - 1], i);
 						++d.badClimbs;
@@ -1666,7 +1709,7 @@ namespace JumpNav
 							logger::info("[{}] DEEPREJECT {:08X} climb at ({:.0f},{:.0f},{:.0f}) dz={:+.0f}: ledge check failed", Tuning::ModeLabel(), d.id, cur.x, cur.y,
 								cur.z, cp.z - cur.z);
 						}
-						return false;
+						return out(-1);
 					}
 					sinceKept = 0;
 					continue;
@@ -1674,74 +1717,83 @@ namespace JumpNav
 				if (d.jump[i]) {
 					// Jump: take-off candidates on the take-off cell (centre and toward the edge), landing candidates on an 8u
 					// patch around the landing cell, flattest first. First pair the real jump planner accepts wins.
-					const Vec  dir2 = cp - cur;
-					const float dl = (std::max)(Len2D(dir2), 1.0f);
-					const Vec  fw{ dir2.x / dl, dir2.y / dl, 0.0f };
-					std::vector<Vec> takeoffs{ cur };
-					for (float o : { 12.0f, 24.0f, -12.0f }) {
-						float z = 0;
-						const Vec q = cur + fw * o;
-						if (DeepGround(r, q.x, q.y, cur.z + 60.0f, cur.z - 60.0f, d.caps.height, z) && std::fabs(z - cur.z) < 14.0f) {
-							takeoffs.push_back({ q.x, q.y, z });
-						}
-					}
-					struct Cand
-					{
-						Vec   p;
-						float rough;
-					};
-					std::vector<Cand> lands;
-					float             patch[5][5];
-					for (int a = 0; a < 5; ++a) {
-						for (int b = 0; b < 5; ++b) {
+					auto& takeoffs = d.cTake;
+					auto& lands = d.cLand;
+					if (takeoffs.empty()) {
+						const Vec  dir2 = cp - cur;
+						const float dl = (std::max)(Len2D(dir2), 1.0f);
+						const Vec  fw{ dir2.x / dl, dir2.y / dl, 0.0f };
+						takeoffs.push_back(cur);
+						for (float o : { 12.0f, 24.0f, -12.0f }) {
 							float z = 0;
-							patch[a][b] = DeepGround(r, cp.x + (a - 2) * 8.0f, cp.y + (b - 2) * 8.0f, cp.z + 80.0f, cp.z - 80.0f, d.caps.height, z) ?
-							                  z :
-							                  std::numeric_limits<float>::quiet_NaN();
-						}
-					}
-					for (int a = 1; a < 4; ++a) {
-						for (int b = 1; b < 4; ++b) {
-							const float z = patch[a][b];
-							if (std::isnan(z) || std::fabs(z - cp.z) > 24.0f) {
-								continue;
+							const Vec q = cur + fw * o;
+							if (DeepGround(r, q.x, q.y, cur.z + 60.0f, cur.z - 60.0f, d.caps.height, z) && std::fabs(z - cur.z) < 14.0f) {
+								takeoffs.push_back({ q.x, q.y, z });
 							}
-							float rough = 0;
-							for (auto [da, db] : { std::pair{ 1, 0 }, std::pair{ -1, 0 }, std::pair{ 0, 1 }, std::pair{ 0, -1 } }) {
-								const float n2 = patch[a + da][b + db];
-								rough = (std::max)(rough, std::isnan(n2) ? 40.0f : std::fabs(n2 - z));
-							}
-							lands.push_back({ { cp.x + (a - 2) * 8.0f, cp.y + (b - 2) * 8.0f, z }, rough });
 						}
-					}
-					std::ranges::sort(lands, {}, &Cand::rough);
-					if (lands.size() > 4) {
-						lands.resize(4);
-					}
-					d.checkRays += r.used;
-					r.used = 0;
-					bool ok = false;
-					int  why[8]{};
-					for (const auto& to : takeoffs) {
-						for (const auto& la : lands) {
-							Plan       plan;
-							const auto res = PlanJump(a_actor, d.caps, to, la.p, goalRef, plan, 0.9f * RaceMotion(a_actor).run);
-							++why[static_cast<int>(res) & 7];
-							if (res == Reject::kOk) {
-								if (Len2D(to - cur) > 4.0f) {
-									d.route.push_back({ to, false, false, false, 0.0f, 0.0f });
+						struct Cand
+						{
+							Vec   p;
+							float rough;
+						};
+						std::vector<Cand> cands;
+						float             patch[5][5];
+						for (int a = 0; a < 5; ++a) {
+							for (int b = 0; b < 5; ++b) {
+								float z = 0;
+								patch[a][b] = DeepGround(r, cp.x + (a - 2) * 8.0f, cp.y + (b - 2) * 8.0f, cp.z + 80.0f, cp.z - 80.0f, d.caps.height, z) ?
+								                  z :
+								                  std::numeric_limits<float>::quiet_NaN();
+							}
+						}
+						for (int a = 1; a < 4; ++a) {
+							for (int b = 1; b < 4; ++b) {
+								const float z = patch[a][b];
+								if (std::isnan(z) || std::fabs(z - cp.z) > 24.0f) {
+									continue;
 								}
-								d.route.push_back({ la.p, true, false, false, 0.0f, 0.0f });
-								++d.routeJumps;
-								cur = la.p;
-								ok = true;
-								break;
+								float rough = 0;
+								for (auto [da, db] : { std::pair{ 1, 0 }, std::pair{ -1, 0 }, std::pair{ 0, 1 }, std::pair{ 0, -1 } }) {
+									const float n2 = patch[a + da][b + db];
+									rough = (std::max)(rough, std::isnan(n2) ? 40.0f : std::fabs(n2 - z));
+								}
+								cands.push_back({ { cp.x + (a - 2) * 8.0f, cp.y + (b - 2) * 8.0f, z }, rough });
 							}
 						}
-						if (ok) {
+						std::ranges::sort(cands, {}, &Cand::rough);
+						for (std::size_t c = 0; c < cands.size() && c < 4; ++c) {
+							lands.push_back(cands[c].p);
+						}
+						d.cPair = 0;
+						std::ranges::fill(d.cWhy, 0);
+					}
+					bool  ok = false;
+					auto& why = d.cWhy;
+					const float hint = 0.9f * RaceMotion(a_actor).run;
+					while (d.cPair < takeoffs.size() * lands.size()) {
+						if (spent() >= cfg.deepScanRays) {
+							return out(0);  // rest of this jump's candidates next frame
+						}
+						const Vec& to = takeoffs[d.cPair / lands.size()];
+						const Vec& la = lands[d.cPair % lands.size()];
+						++d.cPair;
+						Plan       plan;
+						const auto res = PlanJump(a_actor, d.caps, to, la, goalRef, plan, hint);
+						++why[static_cast<int>(res) & 7];
+						if (res == Reject::kOk) {
+							if (Len2D(to - cur) > 4.0f) {
+								d.route.push_back({ to, false, false, false, 0.0f, 0.0f });
+							}
+							d.route.push_back({ la, true, false, false, 0.0f, 0.0f });
+							++d.routeJumps;
+							cur = la;
+							ok = true;
 							break;
 						}
 					}
+					const std::size_t nTake = takeoffs.size(), nLand = lands.size();
+					takeoffs.clear();
+					lands.clear();
 					if (!ok) {
 						DeepBan(d, chain[k - 1], i);
 						++d.badJumps;
@@ -1754,10 +1806,10 @@ namespace JumpNav
 						}
 						if (cfg.log) {
 							logger::info("[{}] DEEPREJECT {:08X} jump ({:.0f},{:.0f},{:.0f}) -> D={:.0f} dz={:+.0f}: {} take-offs x {} landings all failed:{}{}", Tuning::ModeLabel(),
-								d.id, cur.x, cur.y, cur.z, Len2D(cp - cur), cp.z - cur.z, takeoffs.size(), lands.size(), tally,
-								lands.empty() ? " (no flat landing spot)" : "");
+								d.id, cur.x, cur.y, cur.z, Len2D(cp - cur), cp.z - cur.z, nTake, nLand, tally,
+								nLand == 0 ? " (no flat landing spot)" : "");
 						}
-						return false;
+						return out(-1);
 					}
 					sinceKept = 0;
 					continue;
@@ -1776,8 +1828,7 @@ namespace JumpNav
 								d.h[i] = std::numeric_limits<float>::quiet_NaN();
 							}
 							++d.badWalks;
-							d.checkRays += r.used;
-							return false;
+							return out(-1);
 						}
 						p = q;
 					}
@@ -1790,8 +1841,7 @@ namespace JumpNav
 					sinceKept = 0;
 				}
 			}
-			d.checkRays += r.used;
-			return d.route.size() >= 2;
+			return out(d.route.size() >= 2 ? 1 : -1);
 		}
 
 		void FinishDeepScan(DeepScan& d, RE::Actor* a_actor)
@@ -1897,7 +1947,12 @@ namespace JumpNav
 				return false;
 			}
 			if (d.phase == 2) {
-				if (DeepCheckRoute(d, a_actor)) {
+				const int res = DeepCheckRoute(d, a_actor);
+				if (res == 0) {
+					return false;
+				}
+				d.cBegun = false;
+				if (res > 0) {
 					return true;
 				}
 				d.route.clear();
@@ -2052,21 +2107,25 @@ namespace JumpNav
 			return false;
 		}
 
+		// v28: one scan per frame, taking turns (several NPCs scanning at once each did a full frame budget).
 		void TickDeepScans()
 		{
-			for (auto it = g_deep.begin(); it != g_deep.end();) {
-				auto  ptr = it->handle.get();
+			std::erase_if(g_deep, [](DeepScan& d) {
+				auto  ptr = d.handle.get();
 				auto* actor = ptr.get();
-				if (!actor || actor->IsDead() || !actor->Is3DLoaded() || actor->GetPosition().GetDistance(it->start) > 400.0f) {
-					it = g_deep.erase(it);
-					continue;
-				}
-				if (StepDeepScan(*it, actor)) {
-					FinishDeepScan(*it, actor);
-					it = g_deep.erase(it);
-				} else {
-					++it;
-				}
+				return !actor || actor->IsDead() || !actor->Is3DLoaded() || actor->GetPosition().GetDistance(d.start) > 400.0f;
+			});
+			if (g_deep.empty()) {
+				return;
+			}
+			g_deepRr %= g_deep.size();
+			auto& d = g_deep[g_deepRr];
+			auto  ptr = d.handle.get();
+			if (StepDeepScan(d, ptr.get())) {
+				FinishDeepScan(d, ptr.get());
+				g_deep.erase(g_deep.begin() + static_cast<std::ptrdiff_t>(g_deepRr));
+			} else {
+				++g_deepRr;
 			}
 		}
 
@@ -2092,7 +2151,8 @@ namespace JumpNav
 			if (auto ptr = g.handle.get(); ptr.get() && gl && !voluntary &&
 				(Len2D(gl->GetPosition() - ptr->GetPosition()) > g.gap + 60.0f || gl->GetPosition().z - ptr->GetPosition().z > Config::Get().jump.meleeRise * g.caps.height)) {
 				m.forceStuck = true;
-				m.routeNext = g_time + (a_done ? 0.05 : 0.6);
+				// v28: back off after repeated failures (was a new search every ~0.6s: stuck -> sweep -> stuck ...)
+				m.routeNext = g_time + (a_done ? 0.05 : (std::min)(0.6 + 0.6 * m.fails, 3.0));
 			}
 			if (Config::Get().jump.log) {
 				auto  ptr = g.handle.get();
