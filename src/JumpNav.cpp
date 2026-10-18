@@ -949,6 +949,7 @@ namespace JumpNav
 			Vec             blockPt;          // where the last walk-block ray hit (ground height)
 			bool            haveBlockPt = false;
 			int             jumpRetries = 0;  // v29: step-back retries at the current jump node
+			float           unseen = 0;       // v30: how long the target has been out of its perception
 		};
 
 		std::vector<Search> g_searches;
@@ -2215,8 +2216,11 @@ namespace JumpNav
 				} else if (g_time > g.until) {
 					drop = "timeout";
 				} else if (actor->IsInCombat() && g_time >= g.seeNext &&
-						   (g.seeNext = g_time + 0.5, !Perceives(actor, RE::TESForm::LookupByID<RE::Actor>(g.goalId)))) {
-					drop = "lost";  // target became invisible or undetected: stop homing in on it
+						   (g.seeNext = g_time + 0.5, (g.unseen = Perceives(actor, RE::TESForm::LookupByID<RE::Actor>(g.goalId)) ? 0.0f : g.unseen + 0.5f) >= 2.0f)) {
+					// Target invisible or undetected for 2s in a row: stop homing in on it. (v30: was one failed check.
+					// Detection blips to zero for a moment when the NPC turns away or a fence post is in the way - that
+					// ended 10 of 25 routes in Macsut's v29 log, mostly right after a step-back retry at the fence.)
+					drop = "lost";
 				} else if (!actor->IsInCombat() && !FollowingPlayer(actor)) {
 					drop = "calm";
 				} else if (!actor->IsInCombat() && Len2D(RE::PlayerCharacter::GetSingleton()->GetPosition() - actor->GetPosition()) < 0.6f * cfg.followRouteMin) {
@@ -2236,12 +2240,8 @@ namespace JumpNav
 						it = g_glides.erase(it);
 						continue;
 					}
-					const Vec cur = actor->GetPosition();
-					if (auto* goal = RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId)) {
-						const Vec to = goal->GetPosition() - cur;
-						Drive(actor, TurnToward(actor, std::atan2(to.x, to.y)), cur, { 0, 0, 0 }, false);
-					}
-					Locomotion::NoteDriven(g.id, 0.0f);
+					// v30: while the next leg is searched, leave it to its own AI (it may already be close enough to
+					// attack). It used to be held in place facing the target - the "stands a moment before attacking".
 					++it;
 					continue;
 				}
