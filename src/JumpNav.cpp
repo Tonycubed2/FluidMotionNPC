@@ -431,7 +431,15 @@ namespace JumpNav
 			const float tMax = (std::max)(tMin, 1.6f);
 			const float h = a_caps.height;
 			Reject      why = Reject::kRise;
-			int         sweeps = 0;
+			// v32: a failed clearance sweep no longer ends the search after 3 tries. Against a fence the flattest
+			// arcs are exactly the ones that clip the top rail or a post, and stopping there (only ~0.12s of arcs)
+			// made the NPC walk along the fence to a spot where a low arc fit, or step back and retry. Higher arcs
+			// keep being tried up to the rise cap; after the first few failed sweeps only every 3rd arc is swept,
+			// so the extra raycasts stay bounded (at most kMaxSweeps sweeps per check).
+			constexpr int kDenseSweeps = 3;
+			constexpr int kMaxSweeps = 6;
+			int           sweeps = 0;
+			int           skip = 0;
 			for (float T = tMin; T <= tMax; T += 0.04f) {
 				const float v0 = (dz + 0.5f * g * T * T) / T;
 				if (v0 - g * T > -20.0f) {
@@ -451,6 +459,10 @@ namespace JumpNav
 				}
 				if (!clear) {
 					why = Reject::kProfile;
+					continue;
+				}
+				if (skip > 0) {
+					--skip;
 					continue;
 				}
 
@@ -483,8 +495,11 @@ namespace JumpNav
 				}
 				if (!swept) {
 					why = Reject::kSweep;
-					if (++sweeps >= 3) {
+					if (++sweeps >= kMaxSweeps) {
 						return why;
+					}
+					if (sweeps >= kDenseSweeps) {
+						skip = 2;  // sweep every 3rd (0.12s higher) arc from here on
 					}
 					continue;
 				}
@@ -660,6 +675,7 @@ namespace JumpNav
 		struct Motion
 		{
 			float run, rotStand, rotMove;
+			float walk = 0.0f;  // v32: the race's own walk speed (floor for combat route legs)
 		};
 
 		// Speeds for actors moved by hand (route legs). Read from the race's run movement-type record (form
@@ -669,6 +685,7 @@ namespace JumpNav
 		{
 			const auto& cfg = Config::Get().jump;
 			Motion      m{ (std::min)(cfg.glideSpeed, kMaxDriveSpeed), cfg.turnRateDeg, cfg.turnRateDeg };
+			m.walk = 0.4f * m.run;
 			if (!cfg.raceMotion) {
 				return m;
 			}
@@ -693,6 +710,8 @@ namespace JumpNav
 			if (run > 50.0f && run < 2000.0f) {
 				m.run = (std::min)(run, kMaxDriveSpeed);
 			}
+			const float walk = d.speeds[SPEED_DIRECTIONS::kForward][MaxSpeeds::kWalk] * mult;
+			m.walk = walk > 30.0f && walk < m.run ? walk : 0.4f * m.run;
 			if (stand > 20.0f && stand < 2000.0f) {
 				m.rotStand = stand;
 			}
@@ -885,8 +904,9 @@ namespace JumpNav
 					}
 				}
 				if (cfg.log) {
-					logger::info("[{}] AFTERLAND {:08X} '{}' jumpState={} dist={:.0f} from landing{}", Tuning::ModeLabel(), id,
-						m.last.name, stuck ? "STUCK" : "no", actor->GetPosition().GetDistance(m.last.end), pathInfo);
+					// v32: was "jumpState=STUCK", which read like a fault; the graph is simply still in its landing animation
+					logger::info("[{}] AFTERLAND {:08X} '{}' inLandingAnim={} dist={:.0f} from landing{}", Tuning::ModeLabel(), id,
+						m.last.name, stuck ? "yes" : "no", actor->GetPosition().GetDistance(m.last.end), pathInfo);
 				}
 			}
 		}
@@ -2384,7 +2404,9 @@ namespace JumpNav
 						// Follow the pace its AI asks for: walking stays walking. Only when its AI asks for nothing at all
 						// (a level-gap chase it gave up on) use 60% of full run so the route still gets somewhere.
 						const float cmd = Locomotion::CommandedSpeed(g.id);
-						mv.run = (std::min)(mv.run, cmd >= 30.0f ? (std::max)(cmd * 1.05f, 60.0f) : 0.6f * mv.run);
+						// v32: never slower than the NPC's own walk. Pressed against a fence its AI asks for barely
+						// anything, and a whole route was then crept along at 60 u/s - it looked like hesitating.
+						mv.run = (std::min)(mv.run, cmd >= 30.0f ? (std::max)(cmd * 1.05f, (std::max)(mv.walk, 60.0f)) : 0.6f * mv.run);
 					}
 					const Vec    wp = g.pts[g.i].p;
 					const Vec    to = wp - cur;
