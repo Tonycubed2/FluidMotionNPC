@@ -48,6 +48,10 @@ namespace Config
 		bool  followVault = true;
 		bool  vault = true;
 		bool  combatVault = true;
+		bool  parkourHandoff = true;
+		float parkourHandoffSec = 1.5f;
+		bool  trail = true;
+		float trailMaxAge = 120.0f;
 		float combatVaultMinSaving = 150.0f;
 		float combatVaultMinRatio = 1.35f;
 		float vaultMaxFrac = 0.6f;

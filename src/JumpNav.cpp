@@ -218,6 +218,7 @@ namespace JumpNav
 			RE::FormID deepPauseTarget = 0;
 			double     deepPauseUntil = 0;
 			double     deepNext = 0;
+			double     trailNext = 0;  // next time a player-trail route may be tried
 		};
 
 		struct Settle
@@ -349,7 +350,10 @@ namespace JumpNav
 			return false;
 		}
 
-		Reject PlanJump(RE::Actor* a_actor, const Caps& a_caps, const Vec& a_start, Vec a_end, RE::TESObjectREFR* a_ignore, Plan& a_out)
+		// a_speedHint: plan as if moving at least this fast (vaults and route jumps: an NPC that slowed to a walk right
+		// before a fence otherwise got a long, high, floaty arc).
+		Reject PlanJump(RE::Actor* a_actor, const Caps& a_caps, const Vec& a_start, Vec a_end, RE::TESObjectREFR* a_ignore, Plan& a_out,
+			float a_speedHint = 0.0f)
 		{
 			const auto& cfg = Config::Get().jump;
 			Count([](Stats& s) { ++s.evals; });
@@ -408,7 +412,7 @@ namespace JumpNav
 			{
 				Vec v;
 				a_actor->GetLinearVelocity(v);
-				speed = Len2D(v);
+				speed = (std::max)(Len2D(v), a_speedHint);
 			}
 			const float g = cfg.gravity;
 			const float vmax = std::clamp(speed * 1.15f, cfg.minSpeed, cfg.maxSpeed);
@@ -1720,7 +1724,7 @@ namespace JumpNav
 					for (const auto& to : takeoffs) {
 						for (const auto& la : lands) {
 							Plan       plan;
-							const auto res = PlanJump(a_actor, d.caps, to, la.p, goalRef, plan);
+							const auto res = PlanJump(a_actor, d.caps, to, la.p, goalRef, plan, 0.9f * RaceMotion(a_actor).run);
 							++why[static_cast<int>(res) & 7];
 							if (res == Reject::kOk) {
 								if (Len2D(to - cur) > 4.0f) {
@@ -2203,8 +2207,20 @@ namespace JumpNav
 					continue;
 				}
 				if (g.pts[g.i].jump) {
+					// A vault over a low obstacle on the same level: Follower Parkour gets the first chance (animated).
+					if (std::fabs(g.pts[g.i].p.z - cur.z) <= cfg.vaultMaxDz) {
+						Caster kr;
+						Hit    kh;
+						const Vec kn = cur + Vec{ 0, 0, g.caps.height * 0.3f };
+						const Vec tw = g.pts[g.i].p + Vec{ 0, 0, g.caps.height * 0.3f };
+						if (kr.Init(actor) && kr.Cast(kn, tw, kh) && !IsActorHit(kh) && Api::ParkourHandoff(actor, kh.point)) {
+							Locomotion::NoteDriven(g.id, 0.0f);
+							++it;
+							continue;
+						}
+					}
 					Plan       plan;
-					const auto r = PlanJump(actor, g.caps, cur, g.pts[g.i].p, RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId), plan);
+					const auto r = PlanJump(actor, g.caps, cur, g.pts[g.i].p, RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId), plan, 0.9f * RaceMotion(actor).run);
 					if (r == Reject::kOccupied && (g.climbWait += a_dt) < 0.8f) {
 						++it;
 						continue;
@@ -2362,6 +2378,130 @@ namespace JumpNav
 
 		void StartSearch(RE::Actor* a_actor, const Caps& a_caps, RE::TESObjectREFR* a_goal, float a_gap, bool stuck, float vanilla);
 
+		// ---------------------------------------------------------------------------------------------------------
+		// Player trail (bTrail): the path the player walked, as ground points every ~96u, flagged where the player
+		// jumped or dropped to get there. When an actor can't find its own way to the player (the deep scan found no
+		// way, or routes keep failing), it walks to the nearest point of the trail it can reach and follows it: the
+		// player went that way, so it is passable. Jumps are re-checked with the real jump planner as they come.
+		// ---------------------------------------------------------------------------------------------------------
+		struct Crumb
+		{
+			Vec    p;
+			double t = 0;
+			bool   jump = false;  // the player was airborne on the way to this point
+		};
+		std::deque<Crumb> g_trail;
+		const void*       g_trailWhere = nullptr;
+		bool              g_trailAir = false;
+
+		void RecordTrail()
+		{
+			const auto& cfg = Config::Get().jump;
+			auto*       p = RE::PlayerCharacter::GetSingleton();
+			if (!cfg.trail || !p || !p->Is3DLoaded()) {
+				g_trail.clear();
+				return;
+			}
+			auto*       ws = p->GetWorldspace();
+			const void* where = ws ? static_cast<const void*>(ws) : static_cast<const void*>(p->GetParentCell());
+			if (where != g_trailWhere || p->IsOnMount()) {
+				g_trail.clear();
+				g_trailWhere = where;
+				return;
+			}
+			if (p->IsInMidair()) {
+				g_trailAir = true;
+				return;  // points are only taken on the ground
+			}
+			const Vec pos = p->GetPosition();
+			if (!g_trail.empty()) {
+				const Vec   d = pos - g_trail.back().p;
+				const float d2 = Len2D(d);
+				if (d2 > 1200.0f) {
+					g_trail.clear();  // teleport / fast travel / load door
+				} else if (d2 < 96.0f && std::fabs(d.z) < 48.0f) {
+					return;
+				}
+			}
+			g_trail.push_back({ pos, g_time, g_trailAir });
+			g_trailAir = false;
+			while (!g_trail.empty() && (g_time - g_trail.front().t > cfg.trailMaxAge || g_trail.size() > 400)) {
+				g_trail.pop_front();
+			}
+		}
+
+		bool TryTrailRoute(RE::Actor* a_actor, const Caps& a_caps, RE::TESObjectREFR* a_goal, Memo& a_memo)
+		{
+			const auto& cfg = Config::Get().jump;
+			if (!cfg.trail || a_goal != RE::PlayerCharacter::GetSingleton() || g_trail.size() < 3 || g_time < a_memo.trailNext) {
+				return false;
+			}
+			a_memo.trailNext = g_time + 4.0;
+			const Vec pos = a_actor->GetPosition();
+			int       k = -1;
+			float     best = 1e30f;
+			for (int i = 0; i + 1 < static_cast<int>(g_trail.size()); ++i) {
+				const Vec   d = g_trail[i].p - pos;
+				const float d2 = Len2D(d);
+				if (d2 > 500.0f || std::fabs(d.z) > 80.0f) {
+					continue;
+				}
+				const float cost = d2 + 2.0f * std::fabs(d.z) - 0.5f * i;  // later points (closer to the player) win ties
+				if (cost < best) {
+					best = cost;
+					k = i;
+				}
+			}
+			if (k < 0) {
+				return false;
+			}
+			Glide g;
+			g.handle = a_actor->GetHandle();
+			g.id = a_actor->GetFormID();
+			g.goalId = a_goal->GetFormID();
+			auto* n = a_actor->GetName();
+			g.name = n && *n ? n : "<unnamed>";
+			g.goal = a_goal->GetPosition();
+			g.gap = a_caps.radius + 40.0f;
+			g.caps = a_caps;
+			g.pts.push_back({ pos, false, false, false, 0.0f, 0.0f });
+			Vec   prev = pos;
+			int   jumps = 0;
+			float len = 0;
+			for (int i = k; i < static_cast<int>(g_trail.size()); ++i) {
+				const Crumb& c = g_trail[i];
+				const float  dz = c.p.z - prev.z;
+				const bool   jump = i > k && (c.jump || dz > 45.0f || dz < -120.0f);
+				if (jump && (!a_caps.jumps || dz > a_caps.up || -dz > a_caps.down || Len2D(c.p - prev) > a_caps.dist)) {
+					break;  // the player made a jump this actor can't: follow the trail up to there
+				}
+				g.pts.push_back({ c.p, jump, false, false, 0.0f, 0.0f });
+				jumps += jump;
+				len += prev.GetDistance(c.p);
+				prev = c.p;
+			}
+			if (g.pts.size() < 3 || (jumps == 0 && Len2D(prev - g.goal) > Len2D(pos - g.goal) - 100.0f)) {
+				return false;  // no real progress along the trail
+			}
+			g.len = len;
+			g.until = g_time + len / (std::min)(cfg.glideSpeed, 200.0f) * 2.0 + 8.0;
+			std::erase_if(g_glides, [&](const Glide& o) { return o.id == g.id; });
+			std::vector<Vec> pts;
+			for (auto& p : g.pts) {
+				pts.push_back(p.p);
+			}
+			Count([](Stats& st) { ++st.routes; });
+			if (cfg.log) {
+				logger::info("[{}] ROUTE {:08X} '{}' why=trail from trail point {}/{} nodes={} jumps={} len={:.0f} goalDist={:.0f}", Tuning::ModeLabel(), g.id,
+					g.name, k, g_trail.size(), g.pts.size(), jumps, len, (g.goal - prev).Length());
+			}
+			RecordDebug(std::move(pts), true, std::format("trail route {} hops {} jumps", g.pts.size() - 1, jumps));
+			g_glides.push_back(std::move(g));
+			a_memo.routeNext = g_time + 0.5;
+			a_memo.fails = 0;
+			return true;
+		}
+
 		void TryRoute(RE::Actor* a_actor, const Caps& a_caps, RE::TESObjectREFR* a_goal, float a_gap, Memo& a_memo, bool a_navOk = false, float a_stillFor = 0.0f)
 		{
 			const auto& cfg = Config::Get().jump;
@@ -2388,8 +2528,11 @@ namespace JumpNav
 				mismatch = (Len2D(mv) < 50.0f || a_memo.forceStuck) && dh < 400.0f && vertOut;
 			}
 			if (dh > cfg.routeMaxDist || (dist < a_caps.radius + a_gap + 120.0f && !vertOut) || g_time < a_memo.routeNext || g_searches.size() >= 4 ||
-				Searching(a_actor->GetFormID()) || FindGlide(a_actor->GetFormID()) || DeepScanning(a_actor->GetFormID()) ||
-				(a_memo.deepPauseTarget == a_goal->GetFormID() && g_time < a_memo.deepPauseUntil)) {
+				Searching(a_actor->GetFormID()) || FindGlide(a_actor->GetFormID()) || DeepScanning(a_actor->GetFormID())) {
+				return;
+			}
+			if (a_memo.deepPauseTarget == a_goal->GetFormID() && g_time < a_memo.deepPauseUntil) {
+				TryTrailRoute(a_actor, a_caps, a_goal, a_memo);  // the deep scan found no way: follow the player's trail
 				return;
 			}
 			const bool follower = !a_actor->IsInCombat() && FollowingPlayer(a_actor);
@@ -2434,6 +2577,10 @@ namespace JumpNav
 			}
 			if (cfg.deepScan && stuck && a_memo.fails >= cfg.deepScanAfter && a_memo.failTarget == a_goal->GetFormID() &&
 				StartDeepScan(a_actor, a_caps, a_goal, a_gap, a_memo)) {
+				a_memo.forceStuck = false;
+				return;
+			}
+			if (stuck && a_memo.fails >= cfg.deepScanAfter + 1 && a_memo.failTarget == a_goal->GetFormID() && TryTrailRoute(a_actor, a_caps, a_goal, a_memo)) {
 				a_memo.forceStuck = false;
 				return;
 			}
@@ -2710,9 +2857,20 @@ namespace JumpNav
 				return false;  // nothing in the way at knee height
 			}
 			const float wall = Len2D(lo.point - pos);
+			// How tall is it? A low fence/bench (up to 0.4 x body height) is vaulted straight away; taller low obstacles
+			// (haystacks, crates) only when walking around is clearly longer.
+			float top = h;
+			{
+				Hit       th;
+				const Vec above = lo.point + dir * 12.0f;
+				if (r.Cast({ above.x, above.y, pos.z + h * cfg.vaultMaxFrac + 10.0f }, { above.x, above.y, pos.z - 20.0f }, th) && !IsActorHit(th)) {
+					top = th.point.z - pos.z;
+				}
+			}
+			const bool low = top <= 0.4f * h;
 			// In combat, only when walking around is clearly longer than going over (a haystack with a short way round
 			// is walked around). With no usable game path at all, vaulting is the way.
-			if (a_actor->IsInCombat()) {
+			if (a_actor->IsInCombat() && !low) {
 				const float around = VanillaPathLen(a_actor, a_target->GetPosition());
 				if (around >= 0.0f && (around - dh < cfg.combatVaultMinSaving || around < cfg.combatVaultMinRatio * dh)) {
 					a_memo.vaultNext = g_time + 1.5;
@@ -2724,6 +2882,11 @@ namespace JumpNav
 			if (r.Cast(over, over + dir * (wall + 70.0f), hi) && !IsActorHit(hi)) {
 				return false;  // taller than a vault (wall, shelf, door frame)
 			}
+			if (Api::ParkourHandoff(a_actor, lo.point)) {
+				a_memo.vaultNext = g_time + 0.25;
+				return true;  // waiting for Follower Parkour's animated vault
+			}
+			const float runHint = 0.9f * RaceMotion(a_actor).run;
 			Reject first = Reject::kOk;
 			for (float extra : { 90.0f, 130.0f, 60.0f }) {
 				if (a_plans <= 0 || wall + extra > dh - 30.0f) {
@@ -2731,7 +2894,7 @@ namespace JumpNav
 				}
 				--a_plans;
 				Plan       plan;
-				const auto rj = PlanJump(a_actor, a_caps, pos, pos + dir * (wall + extra), nullptr, plan);
+				const auto rj = PlanJump(a_actor, a_caps, pos, pos + dir * (wall + extra), nullptr, plan, runHint);
 				if (rj == Reject::kOk && std::fabs(plan.end.z - pos.z) <= cfg.vaultMaxDz) {
 					if (cfg.log) {
 						auto* n = a_actor->GetName();
@@ -2741,7 +2904,7 @@ namespace JumpNav
 					Launch(a_actor, a_caps, plan, Trigger::kShortcut, 0.0f);
 					a_memo.cooldownUntil = g_time + cfg.cooldown;
 					if (a_actor->IsInCombat()) {
-						a_memo.vaultNext = g_time + 4.0;  // no hopping over everything in a row
+						a_memo.vaultNext = g_time + (low ? 1.5 : 4.0);  // no hopping over everything in a row
 					}
 					return true;
 				}
@@ -2937,6 +3100,7 @@ namespace JumpNav
 			}
 			TickSearches();
 			TickDeepScans();
+			RecordTrail();
 
 			auto* lists = RE::ProcessLists::GetSingleton();
 			auto* player = RE::PlayerCharacter::GetSingleton();
@@ -3001,6 +3165,7 @@ namespace JumpNav
 		g_glides.clear();
 		g_searches.clear();
 		g_deep.clear();
+		g_trail.clear();
 		g_tiles.clear();
 		g_sharedBans.clear();
 		g_noWay.clear();

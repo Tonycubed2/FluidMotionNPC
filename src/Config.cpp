@@ -95,6 +95,11 @@ namespace Config
 		j.followVault = ini.GetBoolValue("Jump", "bFollowVault", j.followVault);
 		j.vault = ini.GetBoolValue("Jump", "bVault", j.vault);
 		j.combatVault = ini.GetBoolValue("Jump", "bCombatVault", j.combatVault);
+		j.parkourHandoff = ini.GetBoolValue("Jump", "bParkourHandoff", j.parkourHandoff);
+		getf("fParkourHandoffSec", j.parkourHandoffSec);
+		j.parkourHandoffSec = std::clamp(j.parkourHandoffSec, 0.0f, 5.0f);
+		j.trail = ini.GetBoolValue("Jump", "bTrail", j.trail);
+		getf("fTrailMaxAge", j.trailMaxAge);
 		getf("fCombatVaultMinSaving", j.combatVaultMinSaving);
 		getf("fCombatVaultMinRatio", j.combatVaultMinRatio);
 		getf("fVaultMaxFrac", j.vaultMaxFrac);

@@ -6,6 +6,14 @@
 
 #include "../include/FluidMotionNPC_API.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#	define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#	define NOMINMAX
+#endif
+#include <Windows.h>
+
 namespace Api
 {
 	namespace
@@ -73,6 +81,71 @@ namespace Api
 			}
 			return faction.load(std::memory_order_acquire);
 		}
+	}
+
+	namespace
+	{
+		bool FollowerParkourLoaded()
+		{
+			static const bool loaded = [] {
+				const bool l = ::GetModuleHandleW(L"FollowerParkour.dll") != nullptr;
+				logger::info("Follower Parkour {}: {}", l ? "detected" : "not loaded",
+					l ? "human vaults/climbs are offered to it first (bParkourHandoff)" : "FluidMotionNPC does all vaults/climbs");
+				return l;
+			}();
+			return loaded;
+		}
+
+		struct Handoff
+		{
+			Clock::time_point t0{};
+			RE::NiPoint3      spot{};
+			bool              pending = false;
+			std::vector<std::pair<RE::NiPoint3, Clock::time_point>> declined;  // spots where it did not trigger
+		};
+		std::mutex                                g_handoffMutex;
+		std::unordered_map<RE::FormID, Handoff>   g_handoff;
+	}
+
+	bool ParkourHandoff(RE::Actor* a_actor, const RE::NiPoint3& a_spot)
+	{
+		const auto& cfg = Config::Get().jump;
+		if (!a_actor || !cfg.parkourHandoff || cfg.parkourHandoffSec <= 0.0f || !FollowerParkourLoaded()) {
+			return false;
+		}
+		bool ongoing = false;
+		if (!a_actor->GetGraphVariableBool("SkyParkourOngoing", ongoing)) {
+			return false;  // no SkyParkour moves on this actor (creatures, unpatched skeletons)
+		}
+		if (ongoing) {
+			return true;  // Follower Parkour is doing it
+		}
+		const auto      now = Clock::now();
+		std::lock_guard lk(g_handoffMutex);
+		auto&           h = g_handoff[a_actor->GetFormID()];
+		std::erase_if(h.declined, [&](const auto& d) { return now - d.second > std::chrono::seconds(30); });
+		for (const auto& d : h.declined) {
+			if (d.first.GetDistance(a_spot) < 150.0f) {
+				return false;  // it did not take this obstacle a moment ago: no second wait
+			}
+		}
+		if (!h.pending || h.spot.GetDistance(a_spot) > 150.0f || now - h.t0 > std::chrono::seconds(10)) {
+			h.pending = true;
+			h.t0 = now;
+			h.spot = a_spot;
+			return true;
+		}
+		if (now - h.t0 < std::chrono::duration<float>(cfg.parkourHandoffSec)) {
+			return true;
+		}
+		h.pending = false;
+		h.declined.emplace_back(a_spot, now);
+		if (cfg.log) {
+			auto* n = a_actor->GetName();
+			logger::info("PARKOURHANDOFF {:08X} '{}': Follower Parkour did not move it within {:.1f}s - FluidMotionNPC takes over", a_actor->GetFormID(),
+				n ? n : "", cfg.parkourHandoffSec);
+		}
+		return false;
 	}
 
 	bool ExternalBusy(RE::Actor* a_actor)
