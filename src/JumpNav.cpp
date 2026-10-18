@@ -2257,7 +2257,12 @@ namespace JumpNav
 				} else if (!actor->IsInCombat() && Len2D(RE::PlayerCharacter::GetSingleton()->GetPosition() - actor->GetPosition()) < 0.6f * cfg.followRouteMin) {
 					drop = "arrived";
 				} else if (auto* goal = RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId);
-						   !goal || (g.unseen <= 0.0f && goal->GetPosition().GetDistance(g.goal) > 800.0f)) {
+						   !goal || (g.unseen <= 0.0f && (goal->GetPosition().GetDistance(g.goal) > 800.0f ||
+														(goal->GetPosition().GetDistance(g.goal) > 250.0f && !g.pts.empty() &&
+															goal->GetPosition().GetDistance(actor->GetPosition()) < g.pts.back().p.GetDistance(actor->GetPosition()))))) {
+					// v31: the target (still seen) moved well away from where the route leads and is now closer than the
+					// route's end - e.g. it jumped the fence to this side. Stop following the old route (she used to jump
+					// to the side the player had just left, back and forth) and let a fresh one be planned if needed.
 					drop = "goalmoved";
 				}
 				if (drop) {
@@ -2339,8 +2344,10 @@ namespace JumpNav
 						const float bl = Len2D(back);
 						Caster      br;
 						Hit         bh;
-						if (bl > 1.0f && br.Init(actor)) {
-							const float dist = 50.0f + 25.0f * g.jumpRetries;
+						if (bl > 1.0f && bl + 35.0f < g.caps.dist && br.Init(actor)) {
+							// v31: never step back so far that the jump becomes too long (a 75u step-back then failed with
+							// "range" - 7 route ends in Macsut's v30 log).
+							const float dist = (std::min)(50.0f + 25.0f * g.jumpRetries, g.caps.dist - bl - 15.0f);
 							const Vec   bp = cur - back * (dist / bl);
 							const float kz = (std::max)(35.0f, g.caps.height * 0.35f);
 							const bool  clear = !br.Cast(cur + Vec{ 0, 0, kz }, bp + Vec{ 0, 0, kz }, bh) || IsActorHit(bh);
