@@ -18,6 +18,10 @@ on:
         description: "Changelog text (optional, plain text; use ' | ' to separate lines)"
         required: false
         default: ""
+      file_id:
+        description: "Nexus File ID override (optional; default = NEXUSMODS_FILE_ID variable)"
+        required: false
+        default: ""
       display_name:
         description: "File name shown on Nexus"
         required: false
@@ -33,7 +37,7 @@ jobs:
     steps:
       - name: Check settings
         env:
-          FILE_ID: ${{ vars.NEXUSMODS_FILE_ID }}
+          FILE_ID: ${{ inputs.file_id || vars.NEXUSMODS_FILE_ID }}
           HAS_KEY: ${{ secrets.NEXUSMODS_API_KEY != '' }}
         run: |
           if [ "$HAS_KEY" != "true" ]; then echo "::error::Secret NEXUSMODS_API_KEY is missing in the nexus environment"; exit 1; fi
@@ -98,7 +102,7 @@ jobs:
         uses: Nexus-Mods/upload-action@main
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_id: ${{ vars.NEXUSMODS_FILE_ID }}
+          file_id: ${{ inputs.file_id || vars.NEXUSMODS_FILE_ID }}
           filename: FluidMotionNPC.zip
           display_name: ${{ inputs.display_name }}
           version: ${{ inputs.version }}
