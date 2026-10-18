@@ -49,7 +49,7 @@ namespace Config
 		bool  vault = true;
 		bool  combatVault = true;
 		bool  parkourHandoff = true;
-		float parkourHandoffSec = 1.5f;
+		float parkourHandoffSec = 1.0f;
 		bool  trail = true;
 		float trailMaxAge = 120.0f;
 		float combatVaultMinSaving = 150.0f;

@@ -107,7 +107,7 @@ namespace Api
 		std::unordered_map<RE::FormID, Handoff>   g_handoff;
 	}
 
-	bool ParkourHandoff(RE::Actor* a_actor, const RE::NiPoint3& a_spot)
+	bool ParkourHandoff(RE::Actor* a_actor, const RE::NiPoint3& a_spot, float a_maxDist)
 	{
 		const auto& cfg = Config::Get().jump;
 		if (!a_actor || !cfg.parkourHandoff || cfg.parkourHandoffSec <= 0.0f || !FollowerParkourLoaded()) {
@@ -120,9 +120,19 @@ namespace Api
 		if (ongoing) {
 			return true;  // Follower Parkour is doing it
 		}
-		const auto      now = Clock::now();
-		std::lock_guard lk(g_handoffMutex);
-		auto&           h = g_handoff[a_actor->GetFormID()];
+		// Follower Parkour only moves an NPC that is stuck against the obstacle: its AI pushing, the NPC barely moving,
+		// the ledge within ~30u. Not there yet (or moving freely): nothing to wait for, FluidMotionNPC goes ahead.
+		RE::NiPoint3 vel;
+		a_actor->GetLinearVelocity(vel);
+		const RE::NiPoint3 pos = a_actor->GetPosition();
+		const bool         pressed = std::hypot(a_spot.x - pos.x, a_spot.y - pos.y) <= a_maxDist && std::hypot(vel.x, vel.y) < 40.0f;
+		const auto         now = Clock::now();
+		std::lock_guard    lk(g_handoffMutex);
+		auto&              h = g_handoff[a_actor->GetFormID()];
+		if (!pressed) {
+			h.pending = false;
+			return false;
+		}
 		std::erase_if(h.declined, [&](const auto& d) { return now - d.second > std::chrono::seconds(30); });
 		for (const auto& d : h.declined) {
 			if (d.first.GetDistance(a_spot) < 150.0f) {

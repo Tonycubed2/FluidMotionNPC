@@ -14,7 +14,9 @@ namespace Api
 	// vaults or climbs it over the obstacle at a_spot, give Follower Parkour fParkourHandoffSec to start its own
 	// animated move. True = wait (do nothing yet). After the wait, or at a spot where it already did not trigger,
 	// false = FluidMotionNPC goes ahead, so nobody ever stands at a fence forever.
-	bool  ParkourHandoff(RE::Actor* a_actor, const RE::NiPoint3& a_spot);
+	// Only when the actor is already pressed against the obstacle (within a_maxDist of it, barely moving): that is
+	// the only situation in which Follower Parkour starts a move. Anywhere else there is nothing to wait for.
+	bool  ParkourHandoff(RE::Actor* a_actor, const RE::NiPoint3& a_spot, float a_maxDist = 50.0f);
 
 	// Called by the hooks.
 	void RunPostGraph(RE::Actor* a_actor, int a_src);  // after an actor's animation graph updated (0 = worker job, 1 = main thread)

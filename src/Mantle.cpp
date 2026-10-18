@@ -308,7 +308,7 @@ namespace Mantle
 			}
 		}
 		// Follower Parkour (SkyParkour) gets the first chance at humans' ledges; FluidMotionNPC climbs if it doesn't.
-		if (Api::ParkourHandoff(a, plan.edge)) {
+		if (Api::ParkourHandoff(a, plan.edge, 100.0f)) {
 			return false;
 		}
 		return Start(a, plan);
