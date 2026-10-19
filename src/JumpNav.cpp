@@ -2407,7 +2407,24 @@ namespace JumpNav
 						const float cmd = Locomotion::CommandedSpeed(g.id);
 						// v32: never slower than the NPC's own walk. Pressed against a fence its AI asks for barely
 						// anything, and a whole route was then crept along at 60 u/s - it looked like hesitating.
+						const float fullRun = mv.run;
 						mv.run = (std::min)(mv.run, cmd >= 30.0f ? (std::max)(cmd * 1.05f, (std::max)(mv.walk, 60.0f)) : 0.6f * mv.run);
+						// v34: a run-up. The last stretch before a jump is taken at a real run (70% of full speed at
+						// least) even when its AI only asks for a walk: at walking pace the approach to every fence
+						// took several seconds and looked like hesitating (Macsut v33: route legs at 160 u/s).
+						for (std::size_t j = g.i; j < g.pts.size() && j < g.i + 3; ++j) {
+							if (g.pts[j].jump) {
+								if (Len2D(g.pts[j].p - actor->GetPosition()) < 350.0f) {
+									mv.run = (std::max)(mv.run, 0.7f * fullRun);
+								}
+								break;
+							}
+						}
+					}
+					// v34: stamina. Moving it by hand never used stamina, so an exhausted NPC kept running. Out of stamina
+					// = its walk speed until some comes back.
+					if (auto* avo = actor->AsActorValueOwner(); avo && avo->GetActorValue(RE::ActorValue::kStamina) <= 0.0f) {
+						mv.run = (std::min)(mv.run, (std::max)(mv.walk, 0.45f * mv.run));
 					}
 					const Vec    wp = g.pts[g.i].p;
 					const Vec    to = wp - cur;
