@@ -619,12 +619,15 @@ namespace JumpNav
 		// NPC's behaviour graph raises bForceIdleStop, the engine calls AIProcess::StopCurrentIdle(actor, true) - an
 		// NPC stuck in an idle (leaning, standing, combat stance) ignores the walk start until that runs. The animation
 		// events are still sent as a fallback for graphs that react to them.
+		// NOT "IdleForceDefaultState" (v35 sent it): that event throws the whole behaviour graph back to its default,
+		// unarmed state. On an NPC with its weapon drawn the game still thinks the weapon is out, the graph doesn't, and
+		// attacks are refused from then on - Macsut v35: "it still follows me and jumps the fence but never attacks
+		// again", starting right after the first SLIDEGUARD.
 		void BreakIdle(RE::Actor* a_actor)
 		{
 			if (auto* proc = a_actor->GetActorRuntimeData().currentProcess) {
 				proc->StopCurrentIdle(a_actor, true);
 			}
-			a_actor->NotifyAnimationGraph(RE::BSFixedString("IdleForceDefaultState"));
 			a_actor->NotifyAnimationGraph(RE::BSFixedString("moveStart"));
 		}
 
