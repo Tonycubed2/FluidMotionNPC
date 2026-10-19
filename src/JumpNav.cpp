@@ -2471,6 +2471,11 @@ namespace JumpNav
 					const float hNew = TurnToward(actor, yaw, rate);
 					const float step = g.speed * a_dt;
 					if (g.speed > 20.0f) {
+						// v36: an NPC standing in an idle when its route starts gets the idle ended first, the engine's
+						// way (StopCurrentIdle), instead of being caught sliding afterwards.
+						if (!g.animOn && !actor->IsMoving()) {
+							BreakIdle(actor);
+						}
 						RouteAnimMove(actor, g.animOn, g.animNext, g_time, cfg.log, g.id);
 					}
 					Locomotion::NoteDriven(g.id, g.speed);
