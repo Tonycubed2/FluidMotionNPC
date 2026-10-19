@@ -102,6 +102,7 @@ namespace Config
 		getf("fTrailMaxAge", j.trailMaxAge);
 		getf("fCombatVaultMinSaving", j.combatVaultMinSaving);
 		getf("fCombatVaultMinRatio", j.combatVaultMinRatio);
+		getf("fAttackDelayWhilePathing", j.attackDelayWhilePathing);
 		getf("fVaultMaxFrac", j.vaultMaxFrac);
 		getf("fVaultMaxDz", j.vaultMaxDz);
 		getf("fFollowVaultMinSaving", j.followVaultMinSaving);
@@ -167,5 +168,20 @@ namespace Config
 
 		g_data = std::move(d);
 		logger::info("Config loaded (enabled {})", g_data.enabled);
+
+		// v36: the game's melee attack check waits fCombatAttackAnimationDrivenDelayTime (1.5s) before an NPC that is
+		// still following its path may start an attack - the pause after a route reaches its target. Found in the
+		// 1.6.1170 exe. Set here (every load, so it also restores the vanilla value when the INI says -1).
+		if (auto* gs = RE::GameSettingCollection::GetSingleton()) {
+			if (auto* s = gs->GetSetting("fCombatAttackAnimationDrivenDelayTime")) {
+				static float vanilla = -1.0f;
+				if (vanilla < 0.0f) {
+					vanilla = s->data.f;
+				}
+				const float want = g_data.jump.attackDelayWhilePathing >= 0.0f ? (std::min)(g_data.jump.attackDelayWhilePathing, 5.0f) : vanilla;
+				s->data.f = want;
+				logger::info("fCombatAttackAnimationDrivenDelayTime = {:.2f} (game value {:.2f})", want, vanilla);
+			}
+		}
 	}
 }

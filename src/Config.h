@@ -54,6 +54,7 @@ namespace Config
 		float trailMaxAge = 120.0f;
 		float combatVaultMinSaving = 150.0f;
 		float combatVaultMinRatio = 1.35f;
+		float attackDelayWhilePathing = 0.5f;  // v36: game setting fCombatAttackAnimationDrivenDelayTime (vanilla 1.5); < 0 = leave it
 		float vaultMaxFrac = 0.6f;
 		float vaultMaxDz = 40.0f;
 		float followVaultMinSaving = 95.0f;
