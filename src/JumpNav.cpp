@@ -970,6 +970,11 @@ namespace JumpNav
 			bool            haveBlockPt = false;
 			int             jumpRetries = 0;  // v29: step-back retries at the current jump node
 			float           unseen = 0;       // v30: how long the target has been out of its perception
+			// v35 slide guard: feet relative to the body, measured while the route moves it
+			Vec             footL, footR;
+			bool            haveFeet = false, holding = false;
+			float           winT = 0, winFoot = 0, winMove = 0, holdT = 0;
+			int             slides = 0;
 			Vec             lastSeen;         // v30: target position the last time it was perceived
 			bool            haveSeen = false;
 		};
@@ -2171,7 +2176,7 @@ namespace JumpNav
 			m.routeNext = (std::max<double>)(m.routeNext, g_time + (a_done ? 0.5 : 2.0));
 			auto* gl = RE::TESForm::LookupByID<RE::TESObjectREFR>(g.goalId);
 			const std::string_view why(a_reason);
-			const bool             voluntary = why.starts_with("calm") || why == "aistop" || why == "busy" || why == "parkour" || why == "claimed";
+			const bool             voluntary = why.starts_with("calm") || why == "aistop" || why == "busy" || why == "parkour" || why == "claimed" || why == "noanim";
 			if (a_done) {
 				m.fails = 0;
 				m.stranded = false;
@@ -2542,8 +2547,66 @@ namespace JumpNav
 						logger::info("[{}] ROUTEDRIVE {:08X} '{}' run {:.0f} u/s, turn in place {:.0f} / moving {:.0f} deg/s (raceMotion {})", Tuning::ModeLabel(), g.id, g.name,
 							mv.run, mv.rotStand, mv.rotMove, cfg.raceMotion);
 					}
-					Drive(actor, hNew, np, { fwd.x * g.speed, fwd.y * g.speed, 0.0f }, false);
-					if (reached && !blockedNow) {
+					// v35 slide guard. Moving an NPC by hand only looks right while its walk/run animation plays. Its feet
+					// are measured relative to its body: walking, they swing back and forth; sliding, they stand still while
+					// the body moves. If it slides, the route is paused (not ended): the NPC is held in place, its idle is
+					// broken (IdleForceDefaultState) and its walk started again (moveStart) until the feet move - the run
+					// cycle starting in place - and then the route carries on. Only if that never happens within 3s is the
+					// route given up. NPCs without human foot bones are not checked.
+					bool hold = false;
+					if (auto r3 = actor->Get3D(false)) {
+						auto* lf = r3->GetObjectByName("NPC L Foot [Lft ]");
+						auto* rf = r3->GetObjectByName("NPC R Foot [Rft ]");
+						if (lf && rf) {
+							const Vec here = actor->GetPosition();
+							const Vec rl = lf->world.translate - here, rr = rf->world.translate - here;
+							if (g.haveFeet) {
+								g.winFoot += (rl - g.footL).Length() + (rr - g.footR).Length();
+							}
+							g.footL = rl;
+							g.footR = rr;
+							g.haveFeet = true;
+							g.winT += a_dt;
+							if (!g.holding) {
+								g.winMove += step;
+							} else {
+								g.holdT += a_dt;
+							}
+							if (g.winT >= 0.5f) {
+								if (!g.holding && g.winMove > 30.0f && g.winFoot < 0.12f * g.winMove) {
+									g.holding = true;
+									g.holdT = 0.0f;
+									++g.slides;
+									actor->NotifyAnimationGraph(RE::BSFixedString("IdleForceDefaultState"));
+									actor->NotifyAnimationGraph(RE::BSFixedString("moveStart"));
+									if (cfg.log) {
+										logger::info("[{}] SLIDEGUARD {:08X} '{}' moved {:.0f}u with still feet ({:.0f}) - pausing the route and restarting its walk", Tuning::ModeLabel(),
+											g.id, g.name, g.winMove, g.winFoot);
+									}
+								} else if (g.holding && g.winFoot > 15.0f) {
+									g.holding = false;
+									if (cfg.log) {
+										logger::info("[{}] SLIDEGUARD {:08X} '{}' walking again after {:.1f}s - route continues", Tuning::ModeLabel(), g.id, g.name, g.holdT);
+									}
+								} else if (g.holding) {
+									actor->NotifyAnimationGraph(RE::BSFixedString("IdleForceDefaultState"));
+									actor->NotifyAnimationGraph(RE::BSFixedString("moveStart"));
+								}
+								g.winT = g.winFoot = g.winMove = 0.0f;
+							}
+							hold = g.holding;
+						}
+					}
+					if (hold && g.holdT > 3.0f) {
+						EndGlide(g, "noanim", false);
+						it = g_glides.erase(it);
+						continue;
+					}
+					if (hold) {
+						np = cur;  // keep the speed channel at run so the cycle starts in place, but don't move it
+					}
+					Drive(actor, hNew, np, hold ? Vec{ 0, 0, 0 } : Vec{ fwd.x * g.speed, fwd.y * g.speed, 0.0f }, false);
+					if (reached && !blockedNow && !hold) {
 						++g.i;
 					}
 				}
