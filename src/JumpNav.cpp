@@ -594,6 +594,19 @@ namespace JumpNav
 			a_next = a_now + 0.3;
 		}
 
+		// v36: end whatever idle the NPC is playing the way the game itself does. Found in the 1.6.1170 exe: when an
+		// NPC's behaviour graph raises bForceIdleStop, the engine calls AIProcess::StopCurrentIdle(actor, true) - an
+		// NPC stuck in an idle (leaning, standing, combat stance) ignores the walk start until that runs. The animation
+		// events are still sent as a fallback for graphs that react to them.
+		void BreakIdle(RE::Actor* a_actor)
+		{
+			if (auto* proc = a_actor->GetActorRuntimeData().currentProcess) {
+				proc->StopCurrentIdle(a_actor, true);
+			}
+			a_actor->NotifyAnimationGraph(RE::BSFixedString("IdleForceDefaultState"));
+			a_actor->NotifyAnimationGraph(RE::BSFixedString("moveStart"));
+		}
+
 		// End of a route: put the graph back to idle, unless the actor's own AI is moving (then the AI owns it).
 		void RouteAnimStop(RE::Actor* a_actor, bool a_on)
 		{
@@ -2577,11 +2590,12 @@ namespace JumpNav
 									g.holding = true;
 									g.holdT = 0.0f;
 									++g.slides;
-									actor->NotifyAnimationGraph(RE::BSFixedString("IdleForceDefaultState"));
-									actor->NotifyAnimationGraph(RE::BSFixedString("moveStart"));
+									BreakIdle(actor);
 									if (cfg.log) {
-										logger::info("[{}] SLIDEGUARD {:08X} '{}' moved {:.0f}u with still feet ({:.0f}) - pausing the route and restarting its walk", Tuning::ModeLabel(),
-											g.id, g.name, g.winMove, g.winFoot);
+										float sampled = -1.0f;
+										actor->GetGraphVariableFloat("SpeedSampled", sampled);
+										logger::info("[{}] SLIDEGUARD {:08X} '{}' moved {:.0f}u with still feet ({:.0f}) SpeedSampled={:.0f} - pausing the route and restarting its walk",
+											Tuning::ModeLabel(), g.id, g.name, g.winMove, g.winFoot, sampled);
 									}
 								} else if (g.holding && g.winFoot > 15.0f) {
 									g.holding = false;
@@ -2589,8 +2603,7 @@ namespace JumpNav
 										logger::info("[{}] SLIDEGUARD {:08X} '{}' walking again after {:.1f}s - route continues", Tuning::ModeLabel(), g.id, g.name, g.holdT);
 									}
 								} else if (g.holding) {
-									actor->NotifyAnimationGraph(RE::BSFixedString("IdleForceDefaultState"));
-									actor->NotifyAnimationGraph(RE::BSFixedString("moveStart"));
+									BreakIdle(actor);
 								}
 								g.winT = g.winFoot = g.winMove = 0.0f;
 							}
