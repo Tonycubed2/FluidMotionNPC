@@ -2218,10 +2218,10 @@ namespace JumpNav
 				m.fails = 0;
 				m.stranded = false;
 				m.strandedSince = 0;
-				// v29: arrived in combat - make its AI re-evaluate now instead of standing a moment before attacking.
-				if (auto p = g.handle.get(); p.get() && p->IsInCombat()) {
-					p->EvaluatePackage(false, false);
-				}
+				// (v29 called EvaluatePackage here to shorten the pause before attacking. The 1.6.1170 exe shows that only
+				// sets a "re-check packages" flag - combat isn't package-driven - so it never helped; removed in v36.
+				// The pause is the game's own rule: the melee attack check refuses to attack while the NPC is pathing,
+				// for fCombatAttackAnimationDrivenDelayTime = 1.5s.)
 			} else if (!voluntary && why != "lost" && why != "goalmoved" && why != "arrived") {
 				NoteFail(m, g.goalId);
 			}
