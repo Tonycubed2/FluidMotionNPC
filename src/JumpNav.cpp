@@ -564,6 +564,27 @@ namespace JumpNav
 		// NPCs and blocked legitimate shortcut jumps.)
 		// (The game's "animation driven" flag is NOT used: it is also set during ordinary NPC locomotion, and using it
 		// in v9/v10 blocked almost every follower jump and vault.)
+		// v36: the game's path follower states, read from its state machine in the 1.6.1170 exe
+		// (MovementAgentPathFollowerStandard update): 3 = turning onto the path, 4 = starting it, 13 = following it
+		// (all three: the game has a usable path). 8/10 = keep last direction (coasting at the path's end),
+		// 9 = the path was INCOMPLETE - the game could not reach the target and walked as far as it could,
+		// 11/12 = finished. Before v36 only 4 and 13 counted, so an NPC turning onto its path counted as pathless.
+		bool PathFollowing(std::uint32_t a_state) { return a_state == 3 || a_state == 4 || a_state == 0xd; }
+
+		// The game itself has given up reaching the target: its path is marked incomplete, or it ended in state 9.
+		bool GameGaveUp(RE::Actor* a_actor)
+		{
+			auto pr = PathProbe::GetPathRef(a_actor);
+			if (!pr || !pr->path) {
+				return false;
+			}
+			if (pr->state == 9) {
+				return true;
+			}
+			static PathProbe::PathGeometry geo;
+			return PathProbe::ReadPath(pr->path, geo) && geo.incomplete;
+		}
+
 		bool WantsToMove(RE::Actor* a_actor)
 		{
 			const float cmd = Locomotion::CommandedSpeed(a_actor->GetFormID());
@@ -2812,7 +2833,7 @@ namespace JumpNav
 			if (a_actor->IsInCombat() && !follower && Len2D(rv) < 40.0f && dh > 500.0f) {
 				auto pr = PathProbe::GetPathRef(a_actor);
 				static PathProbe::PathGeometry sgeo;
-				aiPathless = !pr || !pr->path || (pr->state != 4 && pr->state != 0xd) || !PathProbe::ReadPath(pr->path, sgeo) || sgeo.total != sgeo.count ||
+				aiPathless = GameGaveUp(a_actor) || !pr || !pr->path || !PathFollowing(pr->state) || !PathProbe::ReadPath(pr->path, sgeo) || sgeo.total != sgeo.count ||
 				             sgeo.count < 2;
 			}
 			if (!aiPathless) {
@@ -2840,7 +2861,7 @@ namespace JumpNav
 			if (!stuck) {
 				auto pr = PathProbe::GetPathRef(a_actor);
 				static PathProbe::PathGeometry geo;
-				if (!pr || !pr->path || (pr->state != 4 && pr->state != 0xd) || !PathProbe::ReadPath(pr->path, geo) ||
+				if (!pr || !pr->path || !PathFollowing(pr->state) || !PathProbe::ReadPath(pr->path, geo) ||
 					geo.total != geo.count || geo.count < 2) {
 					if (cfg.log && g_time >= a_memo.nextPfLog) {
 						a_memo.nextPfLog = g_time + 5.0;
@@ -2878,7 +2899,7 @@ namespace JumpNav
 		{
 			auto pr = PathProbe::GetPathRef(a_actor);
 			static PathProbe::PathGeometry geo;
-			if (!pr || !pr->path || (pr->state != 4 && pr->state != 0xd) || !PathProbe::ReadPath(pr->path, geo) || geo.total != geo.count || geo.count < 2) {
+			if (!pr || !pr->path || !PathFollowing(pr->state) || !PathProbe::ReadPath(pr->path, geo) || geo.total != geo.count || geo.count < 2) {
 				return false;
 			}
 			const Vec e = geo.nodes[geo.count - 1].pos;
@@ -2954,7 +2975,7 @@ namespace JumpNav
 					logger::info("[{}] VAULTCHECK {:08X} '{}' {}", Tuning::ModeLabel(), a_actor->GetFormID(), n ? n : "", a_msg);
 				}
 			};
-			if (!pr || !pr->path || (pr->state != 4 && pr->state != 0xd)) {
+			if (!pr || !pr->path || !PathFollowing(pr->state)) {
 				why(std::format("no usable path (ref={} state={})", pr.has_value(), pr ? static_cast<int>(pr->state) : -1));
 				return false;
 			}
@@ -3103,7 +3124,7 @@ namespace JumpNav
 		{
 			auto pr = PathProbe::GetPathRef(a_actor);
 			static PathProbe::PathGeometry geo;
-			if (!pr || !pr->path || (pr->state != 4 && pr->state != 0xd) || !PathProbe::ReadPath(pr->path, geo) || geo.total != geo.count || geo.count < 2) {
+			if (!pr || !pr->path || !PathFollowing(pr->state) || !PathProbe::ReadPath(pr->path, geo) || geo.total != geo.count || geo.count < 2) {
 				return -1.0f;
 			}
 			float acc = 0;
