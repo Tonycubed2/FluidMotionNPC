@@ -53,6 +53,10 @@ namespace Config
 		j.pursuit = ini.GetBoolValue("Jump", "bPursuit", j.pursuit);
 		j.follow = ini.GetBoolValue("Jump", "bFollow", j.follow);
 		j.followerJumps = ini.GetBoolValue("Jump", "bFollowerJumps", j.followerJumps);
+		j.calmFollowers = ini.GetBoolValue("Jump", "bCalmFollowers", j.calmFollowers);
+		j.calmAllInteriors = ini.GetBoolValue("Jump", "bCalmAllInteriors", j.calmAllInteriors);
+		j.calmLocations = SplitList(ini.GetValue("Jump", "sCalmLocations",
+			"LocTypeHouse,LocTypePlayerHouse,LocTypeInn,LocTypeStore,LocTypeTemple,LocTypeCastle,LocTypeGuild,LocTypeShip,LocTypeJail"));
 		j.combatJumps = ini.GetBoolValue("Jump", "bCombatJumps", j.combatJumps);
 		j.route = ini.GetBoolValue("Jump", "bRoute", j.route);
 		getf("fRouteMaxDist", j.routeMaxDist);

@@ -3247,6 +3247,10 @@ namespace JumpNav
 			if (!CanJump(a_actor, caps)) {
 				return;
 			}
+			// v37: followers indoors in a house/inn/shop... out of combat: leave them to the game entirely.
+			if (CalmHere(a_actor)) {
+				return;
+			}
 			// INI: followers / NPCs in combat may be limited to walking, routing and climbing (no jumps).
 			if (a_actor->IsInCombat() ? !cfg.combatJumps : (a_actor->IsPlayerTeammate() && !cfg.followerJumps)) {
 				caps.jumps = false;
@@ -3534,5 +3538,37 @@ namespace JumpNav
 				a_out.push_back({ e.points, age, e.launched, e.label });
 			}
 		}
+	}
+}
+
+namespace JumpNav
+{
+	bool CalmHere(RE::Actor* a_actor)
+	{
+		const auto& cfg = Config::Get().jump;
+		if (!cfg.calmFollowers || !a_actor || a_actor->IsPlayerRef() || !a_actor->IsPlayerTeammate() || a_actor->IsInCombat()) {
+			return false;
+		}
+		auto* cell = a_actor->GetParentCell();
+		if (!cell || !cell->IsInteriorCell()) {
+			return false;
+		}
+		bool calm = cfg.calmAllInteriors;
+		for (auto* loc = a_actor->GetCurrentLocation(); loc && !calm; loc = loc->parentLoc) {
+			for (const auto& k : cfg.calmLocations) {
+				if (!k.empty() && loc->HasKeywordString(k)) {
+					calm = true;
+					break;
+				}
+			}
+		}
+		static std::mutex                              lock;
+		static std::unordered_map<RE::FormID, bool>    last;
+		std::scoped_lock                               guard(lock);
+		if (auto& l = last[a_actor->GetFormID()]; l != calm) {
+			l = calm;
+			logger::info("CALM {:08X} '{}' {} (cell {:08X})", a_actor->GetFormID(), a_actor->GetName(), calm ? "indoors in a calm place - left to the game" : "no longer calm", cell->GetFormID());
+		}
+		return calm;
 	}
 }

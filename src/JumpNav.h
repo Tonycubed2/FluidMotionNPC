@@ -53,6 +53,9 @@ namespace JumpNav
 	int   TraceState(RE::FormID a_id);
 	bool  InHurry(RE::Actor* a_actor);
 	bool  IsFollowingPlayer(RE::Actor* a_actor);
+	// v37: follower (or pet) out of combat inside a calm place (house, inn, shop, temple, castle, your home...):
+	// FluidMotionNPC leaves it to the game - no jumps, vaults, climbs or routes (no hopping on the furniture).
+	bool  CalmHere(RE::Actor* a_actor);
 	Stats GetStats();
 
 	struct DebugArc

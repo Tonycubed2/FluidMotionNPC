@@ -9,6 +9,10 @@ namespace Config
 		bool  pursuit = false;
 		bool  follow = true;
 		bool  followerJumps = true;
+		// v37: calm places - followers out of combat indoors in houses, inns, shops... are left to the game
+		bool  calmFollowers = true;
+		bool  calmAllInteriors = false;
+		std::vector<std::string> calmLocations;
 		bool  combatJumps = true;
 		bool  route = true;
 		float routeMaxDist = 2500.0f;
