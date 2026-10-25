@@ -2463,6 +2463,14 @@ namespace JumpNav
 							}
 						}
 					}
+					// v38: followers out of combat move at the pace their own AI asks for, too. Before, a follower on a
+					// route leg was always driven at its race's full run speed - a speed boost that also undid mods like
+					// "Disable Follower Sprint" (schmicu66: "headless chickens"). Walking stays walking, running stays
+					// running; if its AI asks for nothing (stuck), 60% of full run.
+					else if (cfg.followerPace && actor->IsPlayerTeammate()) {
+						const float cmd = Locomotion::CommandedSpeed(g.id);
+						mv.run = (std::min)(mv.run, cmd >= 30.0f ? (std::max)(cmd * 1.05f, (std::max)(mv.walk, 60.0f)) : 0.6f * mv.run);
+					}
 					// v34: stamina. Moving it by hand never used stamina, so an exhausted NPC kept running. Out of stamina
 					// = its walk speed until some comes back.
 					if (auto* avo = actor->AsActorValueOwner(); avo && avo->GetActorValue(RE::ActorValue::kStamina) <= 0.0f) {

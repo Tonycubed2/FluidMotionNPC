@@ -11,6 +11,7 @@ namespace Config
 		bool  followerJumps = true;
 		// v37: calm places - followers out of combat indoors in houses, inns, shops... are left to the game
 		bool  calmFollowers = true;
+		bool  followerPace = true;  // v38: followers' route legs at their own AI's pace (no speed boost)
 		bool  calmAllInteriors = false;
 		std::vector<std::string> calmLocations;
 		bool  combatJumps = true;

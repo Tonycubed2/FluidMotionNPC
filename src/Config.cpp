@@ -54,6 +54,7 @@ namespace Config
 		j.follow = ini.GetBoolValue("Jump", "bFollow", j.follow);
 		j.followerJumps = ini.GetBoolValue("Jump", "bFollowerJumps", j.followerJumps);
 		j.calmFollowers = ini.GetBoolValue("Jump", "bCalmFollowers", j.calmFollowers);
+		j.followerPace = ini.GetBoolValue("Jump", "bFollowerPace", j.followerPace);
 		j.calmAllInteriors = ini.GetBoolValue("Jump", "bCalmAllInteriors", j.calmAllInteriors);
 		j.calmLocations = SplitList(ini.GetValue("Jump", "sCalmLocations",
 			"LocTypeHouse,LocTypePlayerHouse,LocTypeInn,LocTypeStore,LocTypeTemple,LocTypeCastle,LocTypeGuild,LocTypeShip,LocTypeJail"));
