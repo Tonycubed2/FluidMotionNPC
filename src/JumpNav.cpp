@@ -3174,6 +3174,11 @@ namespace JumpNav
 			if (!r.Cast(knee, knee + dir * probe, lo) || IsActorHit(lo)) {
 				return false;  // nothing in the way at knee height
 			}
+			// v39: the ground itself is not an obstacle. Walking up a slope, the knee-height ray hits the hillside in
+			// front, and followers hopped up every slope "like jackrabbits" (Amber8888, chaosscz, soupdragon1234).
+			if (lo.normal.z > 0.5f || lo.layer == RE::COL_LAYER::kTerrain) {
+				return false;
+			}
 			const float wall = Len2D(lo.point - pos);
 			// How tall is it? A low fence/bench (up to 0.4 x body height) is vaulted straight away; taller low obstacles
 			// (haystacks, crates) only when walking around is clearly longer.
@@ -3191,6 +3196,15 @@ namespace JumpNav
 			if (a_actor->IsInCombat() && !low) {
 				const float around = VanillaPathLen(a_actor, a_target->GetPosition());
 				if (around >= 0.0f && (around - dh < cfg.combatVaultMinSaving || around < cfg.combatVaultMinRatio * dh)) {
+					a_memo.vaultNext = g_time + 1.5;
+					return false;
+				}
+			}
+			// v39: a follower out of combat only vaults when walking around is a real detour (the bFollowVault limits),
+			// whatever the height - before it hopped over everything in the straight line to the player.
+			if (!a_actor->IsInCombat()) {
+				const float around = VanillaPathLen(a_actor, a_target->GetPosition());
+				if (around >= 0.0f && (around - dh < cfg.followVaultMinSaving || around < cfg.followVaultMinRatio * dh)) {
 					a_memo.vaultNext = g_time + 1.5;
 					return false;
 				}
@@ -3221,9 +3235,8 @@ namespace JumpNav
 					}
 					Launch(a_actor, a_caps, plan, Trigger::kShortcut, 0.0f);
 					a_memo.cooldownUntil = g_time + cfg.cooldown;
-					if (a_actor->IsInCombat()) {
-						a_memo.vaultNext = g_time + (low ? 1.5 : 4.0);  // no hopping over everything in a row
-					}
+					// no hopping over everything in a row (v39: followers too)
+					a_memo.vaultNext = g_time + (a_actor->IsInCombat() ? (low ? 1.5 : 4.0) : 4.0);
 					return true;
 				}
 				first = first == Reject::kOk ? (rj == Reject::kOk ? Reject::kLanding : rj) : first;
@@ -3331,7 +3344,7 @@ namespace JumpNav
 					}
 				}
 			} else if (cfg.follow && following) {
-				if (caps.jumps && cfg.vault && TryVaultToward(a_actor, caps, player, m, a_plans)) {
+				if (caps.jumps && cfg.vault && cfg.followVault && TryVaultToward(a_actor, caps, player, m, a_plans)) {
 					return;
 				}
 				// A follower that has not really moved for a moment (pressed against a rock or ledge, or standing
