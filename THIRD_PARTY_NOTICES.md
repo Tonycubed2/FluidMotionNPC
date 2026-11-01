@@ -206,3 +206,10 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+
+## SKSE Menu Framework 3 API header
+
+`include/smf/SKSEMenuFramework.h` - the public API header of SKSE Menu Framework by Thiago099 / QTR-Modding
+(https://github.com/QTR-Modding/SKSE-Menu-Framework-3-API), licensed under the GNU Lesser General Public License
+v2.1 (full text in `include/smf/LICENSE-SKSEMenuFramework-API.txt` in the source repository). Used unmodified; it only
+talks to SKSEMenuFramework.dll when that is installed. SKSE Menu Framework itself is not included.

@@ -6,6 +6,7 @@
 #include "FrameHook.h"
 #include "JumpNav.h"
 #include "Locomotion.h"
+#include "Menu.h"
 #include "PathProbe.h"
 #include "Tuning.h"
 
@@ -21,6 +22,7 @@ namespace
 			PathProbe::Install();
 			FrameHook::Install();
 			Tuning::Init();
+			Menu::Register();
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 		case SKSE::MessagingInterface::kNewGame:
@@ -30,6 +32,7 @@ namespace
 			Locomotion::Reload();
 			JumpNav::Reset();
 			Api::Reset();
+			Menu::OnGameLoaded();
 			break;
 		default:
 			break;

@@ -2,6 +2,7 @@
 #include "Api.h"
 #include "JumpNav.h"
 #include "Locomotion.h"
+#include "Menu.h"
 
 namespace FrameHook
 {
@@ -48,6 +49,7 @@ namespace FrameHook
 					}
 				}
 
+				Menu::RunFrame();
 				JumpNav::OnFrame(dt);
 				Locomotion::OnFrame(dt);
 				Api::RunFrame(dt);
