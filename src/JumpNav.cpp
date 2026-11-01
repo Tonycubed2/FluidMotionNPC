@@ -27,6 +27,7 @@ namespace JumpNav
 		constexpr float kSettleSec = 0.35f;
 		constexpr float kJumpWatchSec = 3.0f;
 		constexpr float kRelandAfter = 2.0f;  // only a truly stuck jump state: the normal landing animation is over by then
+		constexpr float kFollowLostStill = 3.0f;  // v41: standing still this long far behind = lost (when the game didn't give up)
 		constexpr float kFollowStill = 0.5f;   // a follower that moved less than kStillDist for this long is stuck
 		constexpr float kStillDist = 40.0f;
 
@@ -2835,6 +2836,17 @@ namespace JumpNav
 				a_memo.rBestTime = g_time;
 				return;
 			}
+			// v41: a follower is only moved along a route when the game really can't get it to you:
+			//  - its own path was given up (incomplete path / state 9), or
+			//  - its AI keeps trying to move but it has not moved for 3 s (pressed against something), or
+			//  - it has stood still for 10 s more than 1000 units behind you (lost without a path).
+			// A follower that just lags behind or waits at its follow distance (Walk With Me, NFF and similar pace
+			// followers and stop them at their own distance) is the game's job. Before, "not getting closer for 1 s"
+			// while you kept walking was enough, and followers and summons were slid up behind you over and over.
+			if (follower && !GameGaveUp(a_actor) && !(a_stillFor >= kFollowLostStill && WantsToMove(a_actor)) && !(a_stillFor >= 10.0f && dh > 1000.0f)) {
+				a_memo.rBestTime = g_time;
+				return;
+			}
 			Vec rv;
 			a_actor->GetLinearVelocity(rv);
 			// v29: stranded - in combat, standing still, target far away and the game's AI has no path to it (e.g. on top
@@ -3392,7 +3404,7 @@ namespace JumpNav
 						if (perceived) {
 							TryRoute(a_actor, caps, combatTgt.get(), IsRanged(a_actor) ? 450.0f : 15.0f, m, navOk);
 						}
-					} else if (following) {
+					} else if (following && cfg.follow) {  // v41: bFollow also covers follower routes
 						TryRoute(a_actor, caps, player, 60.0f, m, false, stillFor);
 					}
 				}

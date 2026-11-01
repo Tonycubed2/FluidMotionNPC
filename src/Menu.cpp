@@ -63,7 +63,9 @@ namespace Menu
 					"Pause before an NPC still following its path may attack (vanilla 1.5). -1 = leave the game's value.", true,
 					[](D& d) -> void* { return &d.jump.attackDelayWhilePathing; }, -1.0f, 3.0f, "%.2f" },
 
-				{ "Followers", "Jump", "bFollow", "Help stuck followers", "A follower stuck below or above you jumps or climbs to reach you.", false,
+				{ "Followers", "Jump", "bFollow", "Help stuck followers",
+					"A follower the game can't get to you (stuck, below or above you) is routed, jumps or climbs to reach you. Off = followers are left entirely to the game and your follower mods.",
+					false,
 					[](D& d) -> void* { return &d.jump.follow; } },
 				{ nullptr, "Jump", "bFollowerJumps", "Jumps for followers", "Off = followers only walk, route and climb.", false,
 					[](D& d) -> void* { return &d.jump.followerJumps; } },
@@ -77,7 +79,7 @@ namespace Menu
 				{ nullptr, "Jump", "bCalmAllInteriors", "Every interior is calm", "Out of combat, every interior counts as calm (dungeons too).", false,
 					[](D& d) -> void* { return &d.jump.calmAllInteriors; } },
 				{ nullptr, "Jump", "fFollowRouteMin", "Follower help distance",
-					"A follower is only routed or takes shortcut jumps when at least this far from you (units).", true,
+					"How far behind you a stuck follower must be before FluidMotionNPC helps it (units). Followers that just lag behind are left to the game.", true,
 					[](D& d) -> void* { return &d.jump.followRouteMin; }, 150.0f, 2000.0f, "%.0f" },
 
 				{ "Animations", "Anim", "bEnabled", "Traversal animations", "Climb, ledge-grab and jump animations for NPCs.", false,
